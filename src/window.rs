@@ -6,6 +6,7 @@ use gtk::{gio, glib};
 use crate::actions;
 use crate::grid::{PhotoGrid, SortBy};
 use crate::photo::{Entry, PhotoInfo};
+use crate::sidebar::FolderTree;
 use crate::viewer::Viewer;
 
 const MIN_CELL: f64 = 96.0;
@@ -15,10 +16,9 @@ const DEFAULT_CELL: f64 = 224.0;
 pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::ApplicationWindow {
     let grid = PhotoGrid::new(DEFAULT_CELL as i32);
 
-    let open = gtk::Button::builder()
-        .icon_name("folder-open-symbolic")
-        .tooltip_text("Open Folder (Ctrl+O)")
-        .action_name("win.open")
+    let folders = gtk::ToggleButton::builder()
+        .icon_name("folder-symbolic")
+        .tooltip_text("Folders (F9)")
         .build();
     let up = gtk::Button::builder()
         .icon_name("go-up-symbolic")
@@ -50,24 +50,12 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
 
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&title));
-    header.pack_start(&open);
+    header.pack_start(&folders);
     header.pack_start(&up);
     header.pack_end(&size);
     header.pack_end(&sort);
     header.pack_end(&file_buttons());
 
-    let open_button = gtk::Button::builder()
-        .label("Open Folder…")
-        .action_name("win.open")
-        .halign(gtk::Align::Center)
-        .css_classes(["pill", "suggested-action"])
-        .build();
-    let welcome = adw::StatusPage::builder()
-        .icon_name("folder-pictures-symbolic")
-        .title("Open a Folder")
-        .description("Browse your photos with big thumbnails")
-        .child(&open_button)
-        .build();
     let nothing = adw::StatusPage::builder()
         .icon_name("folder-symbolic")
         .title("Nothing Here")
@@ -75,9 +63,8 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
         .build();
 
     let stack = gtk::Stack::new();
-    stack.add_named(&welcome, Some("welcome"));
-    stack.add_named(&nothing, Some("nothing"));
     stack.add_named(grid.widget(), Some("grid"));
+    stack.add_named(&nothing, Some("nothing"));
     {
         let stack = stack.clone();
         grid.connect_loaded(move |has_entries| {
@@ -85,9 +72,21 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
         });
     }
 
+    // The folder tree slides in from the left and pushes the grid over.
+    let tree = FolderTree::new();
+    let split = adw::OverlaySplitView::builder()
+        .sidebar(tree.widget())
+        .content(&stack)
+        .show_sidebar(false)
+        .collapsed(false)
+        .min_sidebar_width(200.0)
+        .max_sidebar_width(360.0)
+        .build();
+    split.bind_property("show-sidebar", &folders, "active").bidirectional().sync_create().build();
+
     let view = adw::ToolbarView::new();
     view.add_top_bar(&header);
-    view.set_content(Some(&stack));
+    view.set_content(Some(&split));
 
     let grid_page = adw::NavigationPage::builder().child(&view).tag("grid").title("Lantern").build();
     let viewer = Viewer::new(grid.store().clone(), grid.thumbs().clone());
@@ -140,26 +139,21 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
         });
     }
 
-    let open_action = gio::SimpleAction::new("open", None);
+    let folders_action = gio::SimpleAction::new("folders", None);
     {
-        let window = window.clone();
+        let split = split.clone();
+        folders_action.connect_activate(move |_, _| split.set_show_sidebar(!split.shows_sidebar()));
+    }
+    {
         let show_folder = show_folder.clone();
-        open_action.connect_activate(move |_, _| {
-            let dialog = gtk::FileDialog::builder().title("Open Folder").modal(true).build();
-            let show_folder = show_folder.clone();
-            dialog.select_folder(Some(&window), gio::Cancellable::NONE, move |result| {
-                if let Ok(dir) = result {
-                    show_folder(dir);
-                }
-            });
-        });
+        tree.connect_folder_selected(move |dir| show_folder(dir));
     }
 
     window.add_action(&up_action);
-    window.add_action(&open_action);
+    window.add_action(&folders_action);
     let app = window.application().unwrap();
     app.set_accels_for_action("win.up", &["<Alt>Up"]);
-    app.set_accels_for_action("win.open", &["<Control>o"]);
+    app.set_accels_for_action("win.folders", &["F9", "<Control>o"]);
 
     // Double-click: into a subfolder, or into the viewer.
     {
@@ -177,9 +171,8 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
         });
     }
 
-    if let Some(dir) = folder {
-        show_folder(dir);
-    }
+    // Start somewhere useful: the folder given, else the home folder.
+    show_folder(folder.unwrap_or_else(|| gio::File::for_path(glib::home_dir())));
 
     window
 }

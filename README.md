@@ -8,13 +8,14 @@ Downloads, or move and rename, and that's it.
 
 ## Using it
 
-Open a folder (or run `lantern ~/Pictures`). Subfolders come first, then
-photos sorted by date taken. Double-click a photo to see it full size and use
-the arrow keys to step through the folder.
+Lantern opens on your home folder (or run `lantern ~/Pictures`). The folder
+button slides out a tree of the filesystem; subfolders also show first in the
+grid, then photos sorted by date taken. Double-click a photo to see it full
+size and use the arrow keys to step through the folder.
 
 | Keys | What |
 | --- | --- |
-| Ctrl+O | Open a folder |
+| F9 | Show or hide the folder tree |
 | Alt+Up | Parent folder |
 | Ctrl+scroll, Ctrl+plus / Ctrl+minus, Ctrl+0 | Thumbnail size |
 | Delete | Move selected photos to the trash |
