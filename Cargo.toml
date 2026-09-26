@@ -1,0 +1,19 @@
+[package]
+name = "lantern"
+version = "0.1.0"
+edition = "2024"
+description = "A fast Linux photo browser with big, adjustable thumbnails"
+license = "MIT"
+readme = "README.md"
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
+adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Decoding is the hot path; keep it fast even in debug builds.
+[profile.dev.package."*"]
+opt-level = 3
