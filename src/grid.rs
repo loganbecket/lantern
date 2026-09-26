@@ -43,6 +43,8 @@ pub struct PhotoGrid {
     generation: Rc<Cell<u32>>,
     sort_by: Rc<Cell<SortBy>>,
     reverse: Rc<Cell<bool>>,
+    /// Called once a folder's listing is in, with whether it had anything.
+    on_loaded: Rc<RefCell<Option<Box<dyn Fn(bool)>>>>,
 }
 
 impl PhotoGrid {
@@ -74,6 +76,7 @@ impl PhotoGrid {
             generation: Rc::default(),
             sort_by: Rc::new(Cell::new(SortBy::Date)),
             reverse: Rc::new(Cell::new(false)),
+            on_loaded: Rc::default(),
         };
         grid.view.set_factory(Some(&grid.make_factory()));
 
@@ -107,6 +110,10 @@ impl PhotoGrid {
 
     pub fn connect_selection_changed(&self, f: impl Fn() + 'static) {
         self.selection.connect_selection_changed(move |_, _, _| f());
+    }
+
+    pub fn connect_loaded(&self, f: impl Fn(bool) + 'static) {
+        *self.on_loaded.borrow_mut() = Some(Box::new(f));
     }
 
     /// The open folder, if any.
@@ -224,9 +231,13 @@ impl PhotoGrid {
             if grid.generation.get() != generation {
                 return;
             }
+            let has_entries = !folders.is_empty() || !photos.is_empty();
             *grid.folders.borrow_mut() = folders;
             *grid.photos.borrow_mut() = photos.clone();
             grid.apply_sort();
+            if let Some(on_loaded) = &*grid.on_loaded.borrow() {
+                on_loaded(has_entries);
+            }
 
             let started = std::time::Instant::now();
             let taken = read_taken_dates(&photos).await;

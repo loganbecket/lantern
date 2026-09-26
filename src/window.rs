@@ -56,15 +56,34 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
     header.pack_end(&sort);
     header.pack_end(&file_buttons());
 
-    let empty = adw::StatusPage::builder()
+    let open_button = gtk::Button::builder()
+        .label("Open Folder…")
+        .action_name("win.open")
+        .halign(gtk::Align::Center)
+        .css_classes(["pill", "suggested-action"])
+        .build();
+    let welcome = adw::StatusPage::builder()
         .icon_name("folder-pictures-symbolic")
         .title("Open a Folder")
         .description("Browse your photos with big thumbnails")
+        .child(&open_button)
+        .build();
+    let nothing = adw::StatusPage::builder()
+        .icon_name("folder-symbolic")
+        .title("Nothing Here")
+        .description("This folder has no photos or subfolders")
         .build();
 
     let stack = gtk::Stack::new();
-    stack.add_named(&empty, Some("empty"));
+    stack.add_named(&welcome, Some("welcome"));
+    stack.add_named(&nothing, Some("nothing"));
     stack.add_named(grid.widget(), Some("grid"));
+    {
+        let stack = stack.clone();
+        grid.connect_loaded(move |has_entries| {
+            stack.set_visible_child_name(if has_entries { "grid" } else { "nothing" });
+        });
+    }
 
     let view = adw::ToolbarView::new();
     view.add_top_bar(&header);
@@ -92,6 +111,7 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
         let grid = grid.clone();
         size.connect_value_changed(move |s| grid.set_cell_size(s.value() as i32));
     }
+    add_zoom(&window, &view, &size);
 
     add_sort_actions(&window, &grid);
     add_file_actions(&window, &grid, &viewer, &nav, &toasts);
@@ -162,6 +182,40 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
     }
 
     window
+}
+
+/// Thumbnail size from the keyboard (Ctrl +/-/0) and Ctrl+scroll.
+fn add_zoom(window: &adw::ApplicationWindow, grid_page: &impl IsA<gtk::Widget>, size: &gtk::Scale) {
+    const STEP: f64 = 32.0;
+
+    let zoom = |name: &str, delta: Option<f64>| {
+        let action = gio::SimpleAction::new(name, None);
+        let size = size.clone();
+        action.connect_activate(move |_, _| match delta {
+            Some(delta) => size.set_value(size.value() + delta),
+            None => size.set_value(DEFAULT_CELL),
+        });
+        action
+    };
+    window.add_action(&zoom("zoom-in", Some(STEP)));
+    window.add_action(&zoom("zoom-out", Some(-STEP)));
+    window.add_action(&zoom("zoom-reset", None));
+    let app = window.application().unwrap();
+    app.set_accels_for_action("win.zoom-in", &["<Control>plus", "<Control>equal", "<Control>KP_Add"]);
+    app.set_accels_for_action("win.zoom-out", &["<Control>minus", "<Control>KP_Subtract"]);
+    app.set_accels_for_action("win.zoom-reset", &["<Control>0", "<Control>KP_0"]);
+
+    let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+    scroll.set_propagation_phase(gtk::PropagationPhase::Capture);
+    let size = size.clone();
+    scroll.connect_scroll(move |controller, _, dy| {
+        if !controller.current_event_state().contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+            return glib::Propagation::Proceed;
+        }
+        size.set_value(size.value() - dy * STEP);
+        glib::Propagation::Stop
+    });
+    grid_page.add_controller(scroll);
 }
 
 /// Trash, Download, Move/Rename, as a linked group for a header bar.
