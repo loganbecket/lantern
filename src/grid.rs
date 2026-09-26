@@ -63,6 +63,8 @@ impl PhotoGrid {
         let scrolled = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .child(&view)
+            .hexpand(true)
+            .vexpand(true)
             .build();
 
         let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
