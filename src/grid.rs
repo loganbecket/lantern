@@ -124,6 +124,9 @@ impl PhotoGrid {
             }
             touched.set(touched.get().wrapping_add(1));
             let adjustment = grid.scrolled.vadjustment();
+            if std::env::var_os("LANTERN_DEBUG").is_some() {
+                eprintln!("scroll unit={:?} dy={dy:.2} page={:.0} value={:.0}", controller.unit(), adjustment.page_size(), adjustment.value());
+            }
             let delta = if controller.unit() == gtk::gdk::ScrollUnit::Wheel {
                 let row = (grid.cell_size.get() + 2 * CELL_PADDING) as f64;
                 dy * (2.0 * row).max(adjustment.page_size() / 2.0)

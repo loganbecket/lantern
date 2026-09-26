@@ -125,6 +125,7 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
             title.set_subtitle(&dir.path().unwrap_or_default().display().to_string());
             stack.set_visible_child_name("grid");
             up_action.set_enabled(dir.parent().is_some());
+            remember_folder(&dir);
             grid.load(dir);
         }
     };
@@ -171,10 +172,36 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
         });
     }
 
-    // Start somewhere useful: the folder given, else the home folder.
-    show_folder(folder.unwrap_or_else(|| gio::File::for_path(glib::home_dir())));
+    // Start somewhere useful: the folder given, else where we left off,
+    // else the home folder.
+    show_folder(
+        folder
+            .or_else(last_folder)
+            .unwrap_or_else(|| gio::File::for_path(glib::home_dir())),
+    );
 
     window
+}
+
+/// Where the last-opened folder is written: one line, the path.
+fn last_folder_file() -> std::path::PathBuf {
+    glib::user_config_dir().join("lantern").join("last-folder")
+}
+
+fn remember_folder(dir: &gio::File) {
+    let Some(path) = dir.path() else { return };
+    let file = last_folder_file();
+    if let Some(parent) = file.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(file, path.to_string_lossy().as_bytes());
+}
+
+/// The last-opened folder, if it is still there.
+fn last_folder() -> Option<gio::File> {
+    let path = std::fs::read_to_string(last_folder_file()).ok()?;
+    let path = std::path::PathBuf::from(path.trim_end());
+    path.is_dir().then(|| gio::File::for_path(path))
 }
 
 /// Thumbnail size from the keyboard (Ctrl +/-/0) and Ctrl+scroll.
