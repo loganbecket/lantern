@@ -106,8 +106,10 @@ impl PhotoGrid {
     /// itself, so this controller sits on the parent box: capture runs
     /// parent-first, which is the only way to get in ahead of it.
     fn speed_up_scrolling(&self) {
-        const TOUCHPAD_GAIN: f64 = 3.0;
-        const GLIDE_FRICTION: f64 = 0.95;
+        // GTK itself multiplies touchpad deltas by 2.5, so 3.0 was no faster
+        // than stock. This is three times the stock speed.
+        const TOUCHPAD_GAIN: f64 = 7.5;
+        const GLIDE_FRICTION: f64 = 0.97;
 
         let flags = gtk::EventControllerScrollFlags::VERTICAL | gtk::EventControllerScrollFlags::KINETIC;
         let scroll = gtk::EventControllerScroll::new(flags);
