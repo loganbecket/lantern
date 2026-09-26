@@ -28,15 +28,28 @@ type Key = (PathBuf, u32);
 /// or waiting for.
 pub struct CellState {
     pub picture: gtk::Picture,
+    /// Caption shown for folders only.
+    pub label: gtk::Label,
     key: RefCell<Option<Key>>,
 }
 
 impl CellState {
-    pub fn new(picture: gtk::Picture) -> Rc<Self> {
-        Rc::new(Self { picture, key: RefCell::new(None) })
+    pub fn new(picture: gtk::Picture, label: gtk::Label) -> Rc<Self> {
+        Rc::new(Self { picture, label, key: RefCell::new(None) })
+    }
+
+    /// Turn the cell into a folder tile: icon plus name, no thumbnail.
+    pub fn show_folder(&self, icon: &gtk::IconPaintable, name: &str) {
+        self.picture.set_content_fit(gtk::ContentFit::ScaleDown);
+        self.picture.set_paintable(Some(icon));
+        self.picture.remove_css_class("skeleton");
+        self.picture.remove_css_class("broken");
+        self.label.set_text(name);
+        self.label.set_visible(true);
     }
 
     fn show(&self, texture: &gdk::Texture) {
+        self.picture.set_content_fit(gtk::ContentFit::Contain);
         self.picture.set_paintable(Some(texture));
         self.picture.remove_css_class("skeleton");
         self.picture.remove_css_class("broken");

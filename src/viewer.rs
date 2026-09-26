@@ -6,7 +6,7 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::{gdk, gio, glib};
 
-use crate::photo::PhotoInfo;
+use crate::photo::{Entry, PhotoInfo};
 use crate::thumbs::{CellState, Thumbnails};
 
 /// Decode size when the viewer hasn't been laid out yet.
@@ -51,8 +51,11 @@ impl Viewer {
             page,
             header,
             title,
-            cell: CellState::new(picture),
-            neighbors: [CellState::new(gtk::Picture::new()), CellState::new(gtk::Picture::new())],
+            cell: CellState::new(picture, gtk::Label::new(None)),
+            neighbors: [
+                CellState::new(gtk::Picture::new(), gtk::Label::new(None)),
+                CellState::new(gtk::Picture::new(), gtk::Label::new(None)),
+            ],
             store,
             thumbs,
             index: Cell::new(0),
@@ -107,15 +110,18 @@ impl Viewer {
     }
 
     /// The folder changed underneath the viewer (a photo was trashed, moved
-    /// or renamed): show whatever is at this spot now. Returns false when
-    /// there is nothing left to show.
+    /// or renamed): show whatever photo is at or after this spot now, else
+    /// the nearest one before it. Returns false when none is left.
     pub fn refresh(&self) -> bool {
-        let count = self.store.n_items();
-        if count == 0 {
-            return false;
+        let index = self.index.get();
+        let next = self.nearest_photo(index, 1).or_else(|| self.nearest_photo(index, -1));
+        match next {
+            Some(index) => {
+                self.show(index);
+                true
+            }
+            None => false,
         }
-        self.show(self.index.get().min(count - 1));
-        true
     }
 
     /// Show the photo at `index` in the grid's current order.
@@ -125,17 +131,32 @@ impl Viewer {
     }
 
     fn step(&self, delta: i32) {
-        let count = self.store.n_items() as i64;
-        let next = self.index.get() as i64 + delta as i64;
-        if count > 0 && (0..count).contains(&next) {
-            self.show(next as u32);
+        let from = self.index.get() as i64 + delta as i64;
+        if from >= 0 {
+            if let Some(index) = self.nearest_photo(from as u32, delta) {
+                self.show(index);
+            }
         }
+    }
+
+    /// The first photo at or after `from` (`direction` 1) or at or before
+    /// it (`direction` -1), skipping folder tiles.
+    fn nearest_photo(&self, from: u32, direction: i32) -> Option<u32> {
+        let count = self.store.n_items() as i64;
+        let mut index = from as i64;
+        while (0..count).contains(&index) {
+            if self.photo(index as u32).is_some() {
+                return Some(index as u32);
+            }
+            index += direction as i64;
+        }
+        None
     }
 
     fn photo(&self, index: u32) -> Option<PhotoInfo> {
         let object = self.store.item(index).and_downcast::<glib::BoxedAnyObject>()?;
-        let photo = object.borrow::<PhotoInfo>().clone();
-        Some(photo)
+        let photo = object.borrow::<Entry>().photo().cloned();
+        photo
     }
 
     fn target_size(&self) -> u32 {

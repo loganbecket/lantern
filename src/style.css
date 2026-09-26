@@ -18,3 +18,9 @@ gridview > child:selected {
   background-color: alpha(@error_color, 0.15);
   border-radius: 8px;
 }
+
+/* Folder tiles carry their name; photos don't. */
+.folder-name {
+  margin: 0 8px 12px 8px;
+  font-weight: 600;
+}

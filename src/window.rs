@@ -5,7 +5,7 @@ use gtk::{gio, glib};
 
 use crate::actions;
 use crate::grid::{PhotoGrid, SortBy};
-use crate::photo::PhotoInfo;
+use crate::photo::{Entry, PhotoInfo};
 use crate::viewer::Viewer;
 
 const MIN_CELL: f64 = 96.0;
@@ -15,8 +15,16 @@ const DEFAULT_CELL: f64 = 224.0;
 pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::ApplicationWindow {
     let grid = PhotoGrid::new(DEFAULT_CELL as i32);
 
-    let open = gtk::Button::from_icon_name("folder-open-symbolic");
-    open.set_tooltip_text(Some("Open Folder"));
+    let open = gtk::Button::builder()
+        .icon_name("folder-open-symbolic")
+        .tooltip_text("Open Folder (Ctrl+O)")
+        .action_name("win.open")
+        .build();
+    let up = gtk::Button::builder()
+        .icon_name("go-up-symbolic")
+        .tooltip_text("Parent Folder (Alt+Up)")
+        .action_name("win.up")
+        .build();
 
     let size = gtk::Scale::with_range(gtk::Orientation::Horizontal, MIN_CELL, MAX_CELL, 16.0);
     size.set_value(DEFAULT_CELL);
@@ -43,6 +51,7 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&title));
     header.pack_start(&open);
+    header.pack_start(&up);
     header.pack_end(&size);
     header.pack_end(&sort);
     header.pack_end(&file_buttons());
@@ -68,15 +77,6 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
     nav.add(&grid_page);
     nav.add(viewer.page());
 
-    {
-        let nav = nav.clone();
-        let viewer = viewer.clone();
-        grid.connect_activate(move |index| {
-            viewer.show(index);
-            nav.push_by_tag("viewer");
-        });
-    }
-
     let toasts = adw::ToastOverlay::new();
     toasts.set_child(Some(&nav));
 
@@ -96,22 +96,35 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
     add_sort_actions(&window, &grid);
     add_file_actions(&window, &grid, &viewer, &nav, &toasts);
 
+    let up_action = gio::SimpleAction::new("up", None);
+    up_action.set_enabled(false);
+
     let show_folder = {
         let grid = grid.clone();
+        let up_action = up_action.clone();
         move |dir: gio::File| {
             title.set_subtitle(&dir.path().unwrap_or_default().display().to_string());
             stack.set_visible_child_name("grid");
+            up_action.set_enabled(dir.parent().is_some());
             grid.load(dir);
         }
     };
 
-    if let Some(dir) = folder {
-        show_folder(dir);
+    {
+        let grid = grid.clone();
+        let show_folder = show_folder.clone();
+        up_action.connect_activate(move |_, _| {
+            if let Some(parent) = grid.dir().and_then(|d| d.parent()) {
+                show_folder(parent);
+            }
+        });
     }
 
+    let open_action = gio::SimpleAction::new("open", None);
     {
         let window = window.clone();
-        open.connect_clicked(move |_| {
+        let show_folder = show_folder.clone();
+        open_action.connect_activate(move |_, _| {
             let dialog = gtk::FileDialog::builder().title("Open Folder").modal(true).build();
             let show_folder = show_folder.clone();
             dialog.select_folder(Some(&window), gio::Cancellable::NONE, move |result| {
@@ -120,6 +133,32 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
                 }
             });
         });
+    }
+
+    window.add_action(&up_action);
+    window.add_action(&open_action);
+    let app = window.application().unwrap();
+    app.set_accels_for_action("win.up", &["<Alt>Up"]);
+    app.set_accels_for_action("win.open", &["<Control>o"]);
+
+    // Double-click: into a subfolder, or into the viewer.
+    {
+        let entries = grid.clone();
+        let show_folder = show_folder.clone();
+        let viewer = viewer.clone();
+        let nav = nav.clone();
+        grid.connect_activate(move |index| match entries.entry_at(index) {
+            Some(Entry::Folder { file, .. }) => show_folder(file),
+            Some(Entry::Photo(_)) => {
+                viewer.show(index);
+                nav.push_by_tag("viewer");
+            }
+            None => {}
+        });
+    }
+
+    if let Some(dir) = folder {
+        show_folder(dir);
     }
 
     window
