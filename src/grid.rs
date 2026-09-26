@@ -80,6 +80,20 @@ impl PhotoGrid {
         &self.scrolled
     }
 
+    /// The photos in their current sorted order.
+    pub fn store(&self) -> &gio::ListStore {
+        &self.store
+    }
+
+    pub fn thumbs(&self) -> &Rc<Thumbnails> {
+        &self.thumbs
+    }
+
+    /// Called with the index of a photo the user opened (double-click or Enter).
+    pub fn connect_activate(&self, f: impl Fn(u32) + 'static) {
+        self.view.connect_activate(move |_, position| f(position));
+    }
+
     pub fn set_cell_size(&self, size: i32) {
         if self.cell_size.replace(size) != size {
             self.update_columns();
@@ -241,7 +255,7 @@ impl PhotoGrid {
                 cell.picture.set_tooltip_text(Some(&photo.name));
                 let Some(path) = photo.file.path() else { return };
                 let pixels = size as u32 * cell.picture.scale_factor().max(1) as u32;
-                thumbs.request(&cell, path, pixels, item.position());
+                thumbs.request(&cell, path, pixels, item.position(), true);
             });
         }
 

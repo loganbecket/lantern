@@ -3,6 +3,7 @@ mod grid;
 mod loader;
 mod photo;
 mod thumbs;
+mod viewer;
 mod window;
 
 use adw::prelude::*;

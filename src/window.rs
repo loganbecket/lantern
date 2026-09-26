@@ -2,6 +2,7 @@ use adw::prelude::*;
 use gtk::{gio, glib};
 
 use crate::grid::{PhotoGrid, SortBy};
+use crate::viewer::Viewer;
 
 const MIN_CELL: f64 = 96.0;
 const MAX_CELL: f64 = 640.0;
@@ -55,12 +56,26 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
     view.add_top_bar(&header);
     view.set_content(Some(&stack));
 
+    let grid_page = adw::NavigationPage::builder().child(&view).tag("grid").title("Lantern").build();
+    let viewer = Viewer::new(grid.store().clone(), grid.thumbs().clone());
+    let nav = adw::NavigationView::new();
+    nav.add(&grid_page);
+    nav.add(viewer.page());
+
+    {
+        let nav = nav.clone();
+        grid.connect_activate(move |index| {
+            viewer.show(index);
+            nav.push_by_tag("viewer");
+        });
+    }
+
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Lantern")
         .default_width(1200)
         .default_height(800)
-        .content(&view)
+        .content(&nav)
         .build();
 
     {

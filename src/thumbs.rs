@@ -17,7 +17,7 @@ use crate::loader::{Job, Pool, Reply};
 
 /// Thumbnails are decoded at one of these sizes (in pixels, longest edge) so
 /// nudging the size slider reuses what is already decoded.
-const BUCKETS: [u32; 4] = [256, 512, 1024, 2048];
+const BUCKETS: [u32; 5] = [256, 512, 1024, 2048, 4096];
 
 /// Upper bound on decoded pixel data held in memory.
 const CACHE_BYTES: usize = 512 * 1024 * 1024;
@@ -94,9 +94,17 @@ impl Thumbnails {
         self.pool.set_focus(position);
     }
 
+    /// The largest decoded version of `path` already in memory, at any size.
+    pub fn any_cached(&self, path: &std::path::Path) -> Option<gdk::Texture> {
+        let mut cache = self.cache.borrow_mut();
+        BUCKETS.iter().rev().find_map(|b| cache.get(&(path.to_path_buf(), *b)).cloned())
+    }
+
     /// Show `path` in `cell` at roughly `size` pixels, now if cached or
     /// once decoded otherwise. `position` is the photo's index in the grid.
-    pub fn request(&self, cell: &Rc<CellState>, path: PathBuf, size: u32, position: u32) {
+    /// With `placeholder`, the cell shows the skeleton while it waits;
+    /// otherwise whatever it shows now stays until the new texture lands.
+    pub fn request(&self, cell: &Rc<CellState>, path: PathBuf, size: u32, position: u32, placeholder: bool) {
         let key = (path, bucket(size));
         *cell.key.borrow_mut() = Some(key.clone());
 
@@ -104,7 +112,9 @@ impl Thumbnails {
             cell.show(texture);
             return;
         }
-        cell.show_skeleton();
+        if placeholder {
+            cell.show_skeleton();
+        }
 
         let mut waiting = self.waiting.borrow_mut();
         if let Some(entry) = waiting.get_mut(&key) {
