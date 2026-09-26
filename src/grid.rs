@@ -28,6 +28,8 @@ pub enum SortBy {
 /// clone points at the same grid.
 #[derive(Clone)]
 pub struct PhotoGrid {
+    /// Wraps the scrolled window so our scroll handling runs before GTK's.
+    container: gtk::Box,
     scrolled: gtk::ScrolledWindow,
     view: gtk::GridView,
     store: gio::ListStore,
@@ -63,7 +65,11 @@ impl PhotoGrid {
             .child(&view)
             .build();
 
+        let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
+        container.append(&scrolled);
+
         let grid = Self {
+            container,
             scrolled,
             view,
             store,
@@ -95,6 +101,10 @@ impl PhotoGrid {
     /// gentle touchpad. Big thumbnails want far more. A wheel notch moves
     /// two rows (at least half the viewport); touchpad and smooth-wheel
     /// motion is multiplied, with a simple glide after a flick.
+    ///
+    /// GtkScrolledWindow handles scroll events in the capture phase on
+    /// itself, so this controller sits on the parent box: capture runs
+    /// parent-first, which is the only way to get in ahead of it.
     fn speed_up_scrolling(&self) {
         const TOUCHPAD_GAIN: f64 = 3.0;
         const GLIDE_FRICTION: f64 = 0.95;
@@ -145,11 +155,11 @@ impl PhotoGrid {
             });
         });
 
-        self.scrolled.add_controller(scroll);
+        self.container.add_controller(scroll);
     }
 
-    pub fn widget(&self) -> &gtk::ScrolledWindow {
-        &self.scrolled
+    pub fn widget(&self) -> &gtk::Box {
+        &self.container
     }
 
     /// The entries in their current order.
