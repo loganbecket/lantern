@@ -6,6 +6,7 @@ use gtk::{gio, glib};
 use crate::actions;
 use crate::grid::{PhotoGrid, SortBy};
 use crate::photo::{Entry, PhotoInfo};
+use crate::settings;
 use crate::sidebar::FolderTree;
 use crate::viewer::Viewer;
 
@@ -77,12 +78,13 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
     let split = adw::OverlaySplitView::builder()
         .sidebar(tree.widget())
         .content(&stack)
-        .show_sidebar(false)
+        .show_sidebar(settings::get_bool(settings::SIDEBAR).unwrap_or(false))
         .collapsed(false)
         .min_sidebar_width(200.0)
         .max_sidebar_width(360.0)
         .build();
     split.bind_property("show-sidebar", &folders, "active").bidirectional().sync_create().build();
+    split.connect_show_sidebar_notify(|split| settings::set_bool(settings::SIDEBAR, split.shows_sidebar()));
 
     let view = adw::ToolbarView::new();
     view.add_top_bar(&header);
@@ -183,24 +185,15 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
     window
 }
 
-/// Where the last-opened folder is written: one line, the path.
-fn last_folder_file() -> std::path::PathBuf {
-    glib::user_config_dir().join("lantern").join("last-folder")
-}
-
 fn remember_folder(dir: &gio::File) {
-    let Some(path) = dir.path() else { return };
-    let file = last_folder_file();
-    if let Some(parent) = file.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    if let Some(path) = dir.path() {
+        settings::set(settings::LAST_FOLDER, &path.to_string_lossy());
     }
-    let _ = std::fs::write(file, path.to_string_lossy().as_bytes());
 }
 
 /// The last-opened folder, if it is still there.
 fn last_folder() -> Option<gio::File> {
-    let path = std::fs::read_to_string(last_folder_file()).ok()?;
-    let path = std::path::PathBuf::from(path.trim_end());
+    let path = std::path::PathBuf::from(settings::get(settings::LAST_FOLDER)?);
     path.is_dir().then(|| gio::File::for_path(path))
 }
 
