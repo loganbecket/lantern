@@ -1,0 +1,14 @@
+/* Placeholder shown for every photo until its thumbnail is decoded. */
+.skeleton {
+  background-color: alpha(currentColor, 0.08);
+  border-radius: 8px;
+}
+
+gridview > child {
+  padding: 6px;
+}
+
+gridview > child:selected {
+  background-color: alpha(@accent_bg_color, 0.25);
+  border-radius: 12px;
+}

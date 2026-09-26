@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Lantern
+Comment=Browse your photos with big thumbnails
+Exec=lantern
+Icon=io.github.loganbecket.Lantern
+Terminal=false
+Type=Application
+Categories=Graphics;Viewer;GTK;GNOME;
+Keywords=photo;image;picture;viewer;browser;
+StartupNotify=true
+DBusActivatable=false
