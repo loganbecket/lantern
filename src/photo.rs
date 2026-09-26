@@ -1,13 +1,13 @@
 //! What the grid knows about one photo, and how the date taken is found.
 
-use std::io::{Cursor, Read};
+use std::io::Cursor;
 use std::path::Path;
 
 use gtk::{gio, glib};
 
 /// EXIF lives near the start of a file; this is plenty for JPEG and for the
 /// metadata box of iPhone HEIC files.
-const HEADER_BYTES: u64 = 64 * 1024;
+const HEADER_BYTES: usize = 64 * 1024;
 
 /// One tile in the grid: a subfolder or a photo.
 #[derive(Clone, Debug)]
@@ -58,8 +58,7 @@ impl PhotoInfo {
 
 /// Read the EXIF date taken, if the file has one.
 pub fn read_taken(path: &Path) -> Option<i64> {
-    let mut data = Vec::new();
-    std::fs::File::open(path).ok()?.take(HEADER_BYTES).read_to_end(&mut data).ok()?;
+    let data = crate::decode::read_prefix(path, HEADER_BYTES)?;
     let exif = exif::Reader::new().read_from_container(&mut Cursor::new(data)).ok()?;
 
     [exif::Tag::DateTimeOriginal, exif::Tag::DateTime]

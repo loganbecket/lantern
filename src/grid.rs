@@ -87,7 +87,30 @@ impl PhotoGrid {
         let weak = grid.clone();
         grid.scrolled.vadjustment().connect_value_changed(move |_| weak.update_focus());
 
+        grid.speed_up_wheel();
         grid
+    }
+
+    /// GTK scrolls a fixed ~75 px per wheel notch, which is a fraction of a
+    /// row of big thumbnails. Make a notch move a whole row instead (at
+    /// least a quarter of the viewport). Touchpads keep GTK's smooth,
+    /// kinetic behavior.
+    fn speed_up_wheel(&self) {
+        let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+        scroll.set_propagation_phase(gtk::PropagationPhase::Capture);
+        let grid = self.clone();
+        scroll.connect_scroll(move |controller, _, dy| {
+            let state = controller.current_event_state();
+            if controller.unit() != gtk::gdk::ScrollUnit::Wheel || state.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+                return glib::Propagation::Proceed;
+            }
+            let adjustment = grid.scrolled.vadjustment();
+            let row = (grid.cell_size.get() + 2 * CELL_PADDING) as f64;
+            let step = row.max(adjustment.page_size() / 4.0);
+            adjustment.set_value(adjustment.value() + dy * step);
+            glib::Propagation::Stop
+        });
+        self.scrolled.add_controller(scroll);
     }
 
     pub fn widget(&self) -> &gtk::ScrolledWindow {

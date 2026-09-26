@@ -642,6 +642,7 @@ dependencies = [
  "image",
  "kamadak-exif",
  "libadwaita",
+ "libc",
  "libheif-rs",
  "lru",
  "turbojpeg",
