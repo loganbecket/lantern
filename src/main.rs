@@ -1,3 +1,4 @@
+mod actions;
 mod decode;
 mod grid;
 mod loader;

@@ -31,6 +31,8 @@ pub struct PhotoGrid {
     scrolled: gtk::ScrolledWindow,
     view: gtk::GridView,
     store: gio::ListStore,
+    selection: gtk::MultiSelection,
+    dir: Rc<RefCell<Option<gio::File>>>,
     cell_size: Rc<Cell<i32>>,
     thumbs: Rc<Thumbnails>,
     /// Everything in the open folder, unsorted.
@@ -46,7 +48,11 @@ impl PhotoGrid {
         let store = gio::ListStore::new::<glib::BoxedAnyObject>();
         let selection = gtk::MultiSelection::new(Some(store.clone()));
 
-        let view = gtk::GridView::builder().model(&selection).min_columns(1).build();
+        let view = gtk::GridView::builder()
+            .model(&selection)
+            .min_columns(1)
+            .enable_rubberband(true)
+            .build();
 
         let scrolled = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
@@ -57,6 +63,8 @@ impl PhotoGrid {
             scrolled,
             view,
             store,
+            selection,
+            dir: Rc::default(),
             cell_size: Rc::new(Cell::new(cell_size)),
             thumbs: Thumbnails::new(),
             photos: Rc::default(),
@@ -92,6 +100,62 @@ impl PhotoGrid {
     /// Called with the index of a photo the user opened (double-click or Enter).
     pub fn connect_activate(&self, f: impl Fn(u32) + 'static) {
         self.view.connect_activate(move |_, position| f(position));
+    }
+
+    pub fn connect_selection_changed(&self, f: impl Fn() + 'static) {
+        self.selection.connect_selection_changed(move |_, _, _| f());
+    }
+
+    /// The open folder, if any.
+    pub fn dir(&self) -> Option<gio::File> {
+        self.dir.borrow().clone()
+    }
+
+    pub fn photo_at(&self, index: u32) -> Option<PhotoInfo> {
+        let object = self.store.item(index).and_downcast::<glib::BoxedAnyObject>()?;
+        let photo = object.borrow::<PhotoInfo>().clone();
+        Some(photo)
+    }
+
+    /// The selected photos in grid order.
+    pub fn selected(&self) -> Vec<PhotoInfo> {
+        let bitset = self.selection.selection();
+        let mut photos = Vec::new();
+        if let Some((mut iter, first)) = gtk::BitsetIter::init_first(&bitset) {
+            photos.extend(self.photo_at(first));
+            while let Some(index) = iter.next() {
+                photos.extend(self.photo_at(index));
+            }
+        }
+        photos
+    }
+
+    /// Take photos out of the grid after they were trashed or moved away.
+    pub fn remove_files(&self, files: &[gio::File]) {
+        let gone = |f: &gio::File| files.iter().any(|g| g.equal(f));
+        self.photos.borrow_mut().retain(|p| !gone(&p.file));
+        for index in (0..self.store.n_items()).rev() {
+            if self.photo_at(index).is_some_and(|p| gone(&p.file)) {
+                self.store.remove(index);
+            }
+        }
+    }
+
+    /// A photo was renamed in place; keep its spot, update its identity.
+    pub fn replace_file(&self, old: &gio::File, new: gio::File) {
+        let name = new.basename().unwrap_or_default().to_string_lossy().into_owned();
+        let mut photos = self.photos.borrow_mut();
+        let Some(photo) = photos.iter_mut().find(|p| p.file.equal(old)) else { return };
+        photo.file = new;
+        photo.name = name;
+        let updated = photo.clone();
+        drop(photos);
+        for index in 0..self.store.n_items() {
+            if self.photo_at(index).is_some_and(|p| p.file.equal(old)) {
+                self.store.splice(index, 1, &[glib::BoxedAnyObject::new(updated)]);
+                break;
+            }
+        }
     }
 
     pub fn set_cell_size(&self, size: i32) {
@@ -132,6 +196,7 @@ impl PhotoGrid {
     pub fn load(&self, dir: gio::File) {
         let generation = self.generation.get().wrapping_add(1);
         self.generation.set(generation);
+        *self.dir.borrow_mut() = Some(dir.clone());
         self.photos.borrow_mut().clear();
         self.store.remove_all();
 

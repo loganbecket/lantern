@@ -14,6 +14,7 @@ const FALLBACK_SIZE: u32 = 2048;
 
 pub struct Viewer {
     page: adw::NavigationPage,
+    header: adw::HeaderBar,
     title: adw::WindowTitle,
     /// The picture on screen, driven by the shared thumbnail loader.
     cell: Rc<CellState>,
@@ -48,6 +49,7 @@ impl Viewer {
 
         let viewer = Rc::new(Self {
             page,
+            header,
             title,
             cell: CellState::new(picture),
             neighbors: [CellState::new(gtk::Picture::new()), CellState::new(gtk::Picture::new())],
@@ -93,6 +95,27 @@ impl Viewer {
 
     pub fn page(&self) -> &adw::NavigationPage {
         &self.page
+    }
+
+    pub fn header(&self) -> &adw::HeaderBar {
+        &self.header
+    }
+
+    /// The photo on screen.
+    pub fn current(&self) -> Option<PhotoInfo> {
+        self.photo(self.index.get())
+    }
+
+    /// The folder changed underneath the viewer (a photo was trashed, moved
+    /// or renamed): show whatever is at this spot now. Returns false when
+    /// there is nothing left to show.
+    pub fn refresh(&self) -> bool {
+        let count = self.store.n_items();
+        if count == 0 {
+            return false;
+        }
+        self.show(self.index.get().min(count - 1));
+        true
     }
 
     /// Show the photo at `index` in the grid's current order.
