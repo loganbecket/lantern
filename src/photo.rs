@@ -9,6 +9,36 @@ use gtk::{gio, glib};
 /// metadata box of iPhone HEIC files.
 const HEADER_BYTES: u64 = 64 * 1024;
 
+/// One tile in the grid: a subfolder or a photo.
+#[derive(Clone, Debug)]
+pub enum Entry {
+    Folder { file: gio::File, name: String },
+    Photo(PhotoInfo),
+}
+
+impl Entry {
+    pub fn file(&self) -> &gio::File {
+        match self {
+            Entry::Folder { file, .. } => file,
+            Entry::Photo(photo) => &photo.file,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Entry::Folder { name, .. } => name,
+            Entry::Photo(photo) => &photo.name,
+        }
+    }
+
+    pub fn photo(&self) -> Option<&PhotoInfo> {
+        match self {
+            Entry::Photo(photo) => Some(photo),
+            Entry::Folder { .. } => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PhotoInfo {
     pub file: gio::File,
