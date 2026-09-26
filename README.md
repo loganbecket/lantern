@@ -24,13 +24,24 @@ the arrow keys to step through the folder.
 
 ## Install
 
+On Ubuntu 24.04 or Pop!_OS 24.04, download the `.deb` from the
+[latest release](https://github.com/loganbecket/lantern/releases/latest)
+and open it, or:
+
+```
+sudo apt install ./lantern_*.deb
+```
+
+## Build from source
+
 ```
 sudo apt install libgtk-4-dev libadwaita-1-dev libheif-dev cmake nasm
 make install
 ```
 
 This installs Lantern for the current user only, so it needs no root, and adds
-it to your application menu. `make uninstall` removes it.
+it to your application menu. `make uninstall` removes it. `make deb` builds
+the package (needs `cargo install cargo-deb`).
 
 ## License
 

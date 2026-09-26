@@ -10,10 +10,14 @@ APPS    = $(PREFIX)/share/applications
 ICONS   = $(PREFIX)/share/icons/hicolor/scalable/apps
 META    = $(PREFIX)/share/metainfo
 
-.PHONY: build install uninstall clean
+.PHONY: build install uninstall deb clean
 
 build:
 	cargo build --release
+
+# Needs `cargo install cargo-deb`. Output lands in target/debian/.
+deb:
+	cargo deb
 
 install: build
 	install -Dm755 target/release/lantern $(BIN)/lantern
