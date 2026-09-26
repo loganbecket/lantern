@@ -9,7 +9,7 @@ Downloads, or move and rename, and that's it.
 ## Install
 
 ```
-sudo apt install libgtk-4-dev libadwaita-1-dev libheif-dev libturbojpeg0-dev
+sudo apt install libgtk-4-dev libadwaita-1-dev libheif-dev cmake nasm
 make install
 ```
 

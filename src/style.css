@@ -12,3 +12,9 @@ gridview > child:selected {
   background-color: alpha(@accent_bg_color, 0.25);
   border-radius: 12px;
 }
+
+/* A photo that could not be decoded. */
+.broken {
+  background-color: alpha(@error_color, 0.15);
+  border-radius: 8px;
+}

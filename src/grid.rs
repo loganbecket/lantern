@@ -1,13 +1,19 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use adw::prelude::*;
 use gtk::{gio, glib};
 
+use crate::thumbs::{CellState, Thumbnails};
+
 /// File extensions Lantern treats as photos, lowercase.
 const PHOTO_EXTENSIONS: &[&str] = &[
     "jpg", "jpeg", "png", "heic", "heif", "webp", "gif", "tif", "tiff", "bmp", "avif",
 ];
+
+/// Padding around each cell, matching `gridview > child` in style.css.
+const CELL_PADDING: i32 = 6;
 
 /// A scrolling grid of photos from one folder.
 ///
@@ -19,6 +25,7 @@ pub struct PhotoGrid {
     view: gtk::GridView,
     store: gio::ListStore,
     cell_size: Rc<Cell<i32>>,
+    thumbs: Rc<Thumbnails>,
 }
 
 impl PhotoGrid {
@@ -26,19 +33,26 @@ impl PhotoGrid {
         let store = gio::ListStore::new::<gio::File>();
         let selection = gtk::MultiSelection::new(Some(store.clone()));
 
-        let view = gtk::GridView::builder()
-            .model(&selection)
-            .min_columns(1)
-            .max_columns(64)
-            .build();
+        let view = gtk::GridView::builder().model(&selection).min_columns(1).build();
 
         let scrolled = gtk::ScrolledWindow::builder()
             .hscrollbar_policy(gtk::PolicyType::Never)
             .child(&view)
             .build();
 
-        let grid = Self { scrolled, view, store, cell_size: Rc::new(Cell::new(cell_size)) };
+        let grid = Self {
+            scrolled,
+            view,
+            store,
+            cell_size: Rc::new(Cell::new(cell_size)),
+            thumbs: Thumbnails::new(),
+        };
         grid.view.set_factory(Some(&grid.make_factory()));
+
+        // The viewport width arrives through the horizontal adjustment.
+        let weak = grid.clone();
+        grid.scrolled.hadjustment().connect_page_size_notify(move |_| weak.update_columns());
+
         grid
     }
 
@@ -48,8 +62,23 @@ impl PhotoGrid {
 
     pub fn set_cell_size(&self, size: i32) {
         if self.cell_size.replace(size) != size {
+            self.update_columns();
             // A new factory makes the view rebuild its visible cells at the new size.
             self.view.set_factory(Some(&self.make_factory()));
+        }
+    }
+
+    /// Keep `max-columns` at the number of columns that actually fit.
+    ///
+    /// GtkGridView keeps roughly `max_columns * 30` cells alive around the
+    /// visible area, so a generous maximum makes it build and decode far more
+    /// cells than are on screen.
+    fn update_columns(&self) {
+        let width = self.scrolled.hadjustment().page_size() as i32;
+        let cell = self.cell_size.get() + 2 * CELL_PADDING;
+        let columns = if width > 0 { (width / cell).max(1) } else { 1 };
+        if self.view.max_columns() != columns as u32 {
+            self.view.set_max_columns(columns as u32);
         }
     }
 
@@ -73,20 +102,54 @@ impl PhotoGrid {
     fn make_factory(&self) -> gtk::SignalListItemFactory {
         let factory = gtk::SignalListItemFactory::new();
         let size = self.cell_size.get();
+        let thumbs = self.thumbs.clone();
+        let cells: Rc<RefCell<HashMap<gtk::ListItem, Rc<CellState>>>> = Rc::default();
 
-        factory.connect_setup(move |_, item| {
-            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
-            let skeleton = gtk::Box::new(gtk::Orientation::Vertical, 0);
-            skeleton.add_css_class("skeleton");
-            skeleton.set_size_request(size, size);
-            item.set_child(Some(&skeleton));
-        });
+        {
+            let cells = cells.clone();
+            factory.connect_setup(move |_, item| {
+                let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+                let picture = gtk::Picture::builder()
+                    .content_fit(gtk::ContentFit::Contain)
+                    .can_shrink(true)
+                    .width_request(size)
+                    .height_request(size)
+                    .css_classes(["skeleton"])
+                    .build();
+                item.set_child(Some(&picture));
+                cells.borrow_mut().insert(item.clone(), CellState::new(picture));
+            });
+        }
 
-        factory.connect_bind(|_, item| {
+        {
+            let cells = cells.clone();
+            let thumbs = thumbs.clone();
+            factory.connect_bind(move |_, item| {
+                let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+                let file = item.item().and_downcast::<gio::File>().unwrap();
+                let Some(cell) = cells.borrow().get(item).cloned() else { return };
+                let name = file.basename().unwrap_or_default();
+                cell.picture.set_tooltip_text(Some(&name.to_string_lossy()));
+                let Some(path) = file.path() else { return };
+                let pixels = size as u32 * cell.picture.scale_factor().max(1) as u32;
+                thumbs.request(&cell, path, pixels);
+            });
+        }
+
+        {
+            let cells = cells.clone();
+            let thumbs = thumbs.clone();
+            factory.connect_unbind(move |_, item| {
+                let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+                if let Some(cell) = cells.borrow().get(item) {
+                    thumbs.release(cell);
+                }
+            });
+        }
+
+        factory.connect_teardown(move |_, item| {
             let item = item.downcast_ref::<gtk::ListItem>().unwrap();
-            let file = item.item().and_downcast::<gio::File>().unwrap();
-            let name = file.basename().unwrap_or_default();
-            item.child().unwrap().set_tooltip_text(Some(&name.to_string_lossy()));
+            cells.borrow_mut().remove(item);
         });
 
         factory

@@ -71,5 +71,18 @@ data/
 ## Build dependencies (Ubuntu / Pop!_OS)
 
 ```
-sudo apt install libgtk-4-dev libadwaita-1-dev libheif-dev libturbojpeg0-dev
+sudo apt install libgtk-4-dev libadwaita-1-dev libheif-dev cmake nasm
 ```
+
+libjpeg-turbo is built from source by the `turbojpeg` crate (hence cmake and
+nasm) because the version Ubuntu 24.04 ships is too old for its API.
+
+## Measurements
+
+Set `LANTERN_DEBUG=1` to log every decode with its time in milliseconds.
+
+- 2026-09-26, 12 MP JPEG at the 256 px bucket: ~16 ms median, 53 ms max,
+  release build, generated test images.
+- 2026-09-26, 1000-photo folder, 1200x800 window, 224 px cells: 161 cells
+  built and decoded on open (GTK keeps about `columns * 30` cells alive), the
+  rest only when scrolled to.

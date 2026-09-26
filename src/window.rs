@@ -7,7 +7,7 @@ const MIN_CELL: f64 = 96.0;
 const MAX_CELL: f64 = 640.0;
 const DEFAULT_CELL: f64 = 224.0;
 
-pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
+pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::ApplicationWindow {
     let grid = PhotoGrid::new(DEFAULT_CELL as i32);
 
     let open = gtk::Button::from_icon_name("folder-open-symbolic");
@@ -53,19 +53,28 @@ pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         size.connect_value_changed(move |s| grid.set_cell_size(s.value() as i32));
     }
 
+    let show_folder = {
+        let grid = grid.clone();
+        move |dir: gio::File| {
+            title.set_subtitle(&dir.path().unwrap_or_default().display().to_string());
+            stack.set_visible_child_name("grid");
+            grid.load(dir);
+        }
+    };
+
+    if let Some(dir) = folder {
+        show_folder(dir);
+    }
+
     {
         let window = window.clone();
-        let grid = grid.clone();
         open.connect_clicked(move |_| {
             let dialog = gtk::FileDialog::builder().title("Open Folder").modal(true).build();
-            let grid = grid.clone();
-            let stack = stack.clone();
-            let title = title.clone();
+            let show_folder = show_folder.clone();
             dialog.select_folder(Some(&window), gio::Cancellable::NONE, move |result| {
-                let Ok(dir) = result else { return };
-                title.set_subtitle(&dir.path().unwrap_or_default().display().to_string());
-                stack.set_visible_child_name("grid");
-                grid.load(dir);
+                if let Ok(dir) = result {
+                    show_folder(dir);
+                }
             });
         });
     }
