@@ -3,6 +3,7 @@ mod decode;
 mod grid;
 mod loader;
 mod photo;
+mod settings;
 mod sidebar;
 mod thumbs;
 mod viewer;
