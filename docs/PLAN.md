@@ -91,6 +91,16 @@ window in an already running Lantern.
 - 2026-09-26, same code on a CIFS network share (~12 MB/s): reads dominate,
   ~4 photos/s regardless of format. Nothing to fix in the decoder; the
   queue now favors what is on screen so the first rows fill first.
+- 2026-09-26, the share is Wi-Fi at ~8-10 MB/s total, whatever the
+  parallelism; that caps sharp thumbnails at ~3-4 photos/s there. JPEG
+  previews from the EXIF thumbnail (first 64 KB, one read, fadvise) cost
+  ~35 ms sequential and ~120 ms with 7 in flight, so a screenful is
+  recognizable in well under a second and the ~160 buffered cells in a few
+  seconds; sharp versions follow. iPhone HEIC has no cheap preview: its
+  thumbnail sits at the end of the file and libheif 1.17 reads the whole
+  file through the reader API, so HEIC goes straight to the full path.
+  Reads of file prefixes must be one large read: `read_to_end`-style
+  growth costs ~100 ms per file over SMB.
 - 2026-09-26, date taken. Reading the first 64 KB of a file finds the EXIF
   date for 39 of 40 real iPhone HEICs; 1000 local files take ~40 ms. On the
   share every file open costs ~100 ms and opens serialize, so the same pass

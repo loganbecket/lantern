@@ -1,9 +1,9 @@
 //! Main-thread side of thumbnail loading: hands cells their textures, keeps a
 //! bounded in-memory cache, and never touches the disk.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,11 +13,14 @@ use gtk::{gdk, glib};
 use lru::LruCache;
 
 use crate::decode::Decoded;
-use crate::loader::{Job, Pool, Reply};
+use crate::loader::{Job, Kind, Pool, Reply};
 
 /// Thumbnails are decoded at one of these sizes (in pixels, longest edge) so
 /// nudging the size slider reuses what is already decoded.
 const BUCKETS: [u32; 5] = [256, 512, 1024, 2048, 4096];
+
+/// Cache slot for the embedded preview, whatever its size.
+const PREVIEW: u32 = 0;
 
 /// Upper bound on decoded pixel data held in memory.
 const CACHE_BYTES: usize = 512 * 1024 * 1024;
@@ -30,12 +33,15 @@ pub struct CellState {
     pub picture: gtk::Picture,
     /// Caption shown for folders only.
     pub label: gtk::Label,
+    /// The full-size request this cell is bound to, if any.
     key: RefCell<Option<Key>>,
+    /// Whether the picture holds the real thumbnail (not just a preview).
+    sharp: Cell<bool>,
 }
 
 impl CellState {
     pub fn new(picture: gtk::Picture, label: gtk::Label) -> Rc<Self> {
-        Rc::new(Self { picture, label, key: RefCell::new(None) })
+        Rc::new(Self { picture, label, key: RefCell::new(None), sharp: Cell::new(false) })
     }
 
     /// Turn the cell into a folder tile: icon plus name, no thumbnail.
@@ -48,23 +54,30 @@ impl CellState {
         self.label.set_visible(true);
     }
 
-    fn show(&self, texture: &gdk::Texture) {
+    fn show(&self, texture: &gdk::Texture, sharp: bool) {
         self.picture.set_content_fit(gtk::ContentFit::Contain);
         self.picture.set_paintable(Some(texture));
         self.picture.remove_css_class("skeleton");
         self.picture.remove_css_class("broken");
+        self.sharp.set(sharp);
     }
 
     fn show_skeleton(&self) {
         self.picture.set_paintable(None::<&gdk::Paintable>);
         self.picture.remove_css_class("broken");
         self.picture.add_css_class("skeleton");
+        self.sharp.set(false);
     }
 
     fn show_broken(&self) {
         self.picture.set_paintable(None::<&gdk::Paintable>);
         self.picture.remove_css_class("skeleton");
         self.picture.add_css_class("broken");
+        self.sharp.set(false);
+    }
+
+    fn path(&self) -> Option<PathBuf> {
+        self.key.borrow().as_ref().map(|k| k.0.clone())
     }
 }
 
@@ -78,6 +91,17 @@ pub struct Thumbnails {
     cache: RefCell<LruCache<Key, gdk::Texture>>,
     cache_bytes: RefCell<usize>,
     waiting: RefCell<HashMap<Key, Waiting>>,
+    /// Files known to have no embedded preview, so they aren't re-read
+    /// every time their cell scrolls back into view.
+    no_preview: RefCell<HashSet<PathBuf>>,
+}
+
+/// Only JPEGs carry a cheap EXIF preview; anything else would read 64 KB
+/// for nothing.
+fn may_have_preview(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case("jpg") || e.eq_ignore_ascii_case("jpeg"))
 }
 
 impl Thumbnails {
@@ -88,6 +112,7 @@ impl Thumbnails {
             cache: RefCell::new(LruCache::unbounded()),
             cache_bytes: RefCell::new(0),
             waiting: RefCell::new(HashMap::new()),
+            no_preview: RefCell::new(HashSet::new()),
         });
 
         let weak = Rc::downgrade(&this);
@@ -107,71 +132,114 @@ impl Thumbnails {
         self.pool.set_focus(position);
     }
 
-    /// The largest decoded version of `path` already in memory, at any size.
-    pub fn any_cached(&self, path: &std::path::Path) -> Option<gdk::Texture> {
+    /// The largest decoded version of `path` already in memory, at any size,
+    /// down to the embedded preview.
+    pub fn any_cached(&self, path: &Path) -> Option<gdk::Texture> {
         let mut cache = self.cache.borrow_mut();
-        BUCKETS.iter().rev().find_map(|b| cache.get(&(path.to_path_buf(), *b)).cloned())
+        BUCKETS
+            .iter()
+            .rev()
+            .chain([PREVIEW].iter())
+            .find_map(|b| cache.get(&(path.to_path_buf(), *b)).cloned())
     }
 
     /// Show `path` in `cell` at roughly `size` pixels, now if cached or
     /// once decoded otherwise. `position` is the photo's index in the grid.
-    /// With `placeholder`, the cell shows the skeleton while it waits;
-    /// otherwise whatever it shows now stays until the new texture lands.
+    /// With `placeholder`, the cell shows the skeleton (or the embedded
+    /// preview, if that is already in memory) while it waits; otherwise
+    /// whatever it shows now stays until the new texture lands.
     pub fn request(&self, cell: &Rc<CellState>, path: PathBuf, size: u32, position: u32, placeholder: bool) {
-        let key = (path, bucket(size));
+        let key = (path.clone(), bucket(size));
         *cell.key.borrow_mut() = Some(key.clone());
 
         if let Some(texture) = self.cache.borrow_mut().get(&key) {
-            cell.show(texture);
+            cell.show(texture, true);
             return;
         }
         if placeholder {
-            cell.show_skeleton();
+            match self.cache.borrow_mut().get(&(path.clone(), PREVIEW)) {
+                Some(preview) => cell.show(preview, false),
+                None => cell.show_skeleton(),
+            }
         }
 
-        let mut waiting = self.waiting.borrow_mut();
-        if let Some(entry) = waiting.get_mut(&key) {
-            entry.cells.push(Rc::downgrade(cell));
-            return;
+        let cancel = self.enqueue(&key, cell, || Job {
+            path: path.clone(),
+            kind: Kind::Full,
+            target: key.1,
+            position,
+            cancel: Arc::new(AtomicBool::new(false)),
+        });
+        let preview_key = (path.clone(), PREVIEW);
+        let wanted = !cell.sharp.get()
+            && may_have_preview(&path)
+            && !self.no_preview.borrow().contains(&path)
+            && !self.cache.borrow().contains(&preview_key);
+        if wanted {
+            self.enqueue(&preview_key, cell, || Job { path, kind: Kind::Preview, target: PREVIEW, position, cancel });
         }
-        let cancel = Arc::new(AtomicBool::new(false));
-        self.pool.submit(Job { path: key.0.clone(), target: key.1, position, cancel: cancel.clone() });
-        waiting.insert(key, Waiting { cancel, cells: vec![Rc::downgrade(cell)] });
     }
 
-    /// The cell is being recycled; drop its request and cancel the decode if
-    /// nobody else wants it.
+    /// Register `cell` as waiting on `key`, submitting the job if nobody
+    /// else already asked for it. Returns the job's cancel flag.
+    fn enqueue(&self, key: &Key, cell: &Rc<CellState>, job: impl FnOnce() -> Job) -> Arc<AtomicBool> {
+        let mut waiting = self.waiting.borrow_mut();
+        if let Some(entry) = waiting.get_mut(key) {
+            entry.cells.push(Rc::downgrade(cell));
+            return entry.cancel.clone();
+        }
+        let job = job();
+        let cancel = job.cancel.clone();
+        self.pool.submit(job);
+        waiting.insert(key.clone(), Waiting { cancel: cancel.clone(), cells: vec![Rc::downgrade(cell)] });
+        cancel
+    }
+
+    /// The cell is being recycled; drop its requests and cancel the decodes
+    /// if nobody else wants them.
     pub fn release(&self, cell: &Rc<CellState>) {
         let Some(key) = cell.key.borrow_mut().take() else { return };
         let mut waiting = self.waiting.borrow_mut();
-        let Some(entry) = waiting.get_mut(&key) else { return };
-        entry.cells.retain(|c| c.upgrade().is_some_and(|c| !Rc::ptr_eq(&c, cell)));
-        if entry.cells.is_empty() {
-            entry.cancel.store(true, Ordering::Relaxed);
-            waiting.remove(&key);
+        for key in [key.clone(), (key.0, PREVIEW)] {
+            let Some(entry) = waiting.get_mut(&key) else { continue };
+            entry.cells.retain(|c| c.upgrade().is_some_and(|c| !Rc::ptr_eq(&c, cell)));
+            if entry.cells.is_empty() {
+                entry.cancel.store(true, Ordering::Relaxed);
+                waiting.remove(&key);
+            }
         }
     }
 
     fn deliver(&self, reply: Reply) {
         let key = (reply.path, reply.target);
         let Some(entry) = self.waiting.borrow_mut().remove(&key) else { return };
+        let cells = entry.cells.iter().filter_map(Weak::upgrade).filter(|c| c.path().as_deref() == Some(&key.0));
 
-        match reply.result {
-            Ok(decoded) => {
+        match (reply.kind, reply.result) {
+            (Kind::Full, Ok(decoded)) => {
                 let texture = texture_from(decoded);
                 self.insert(key.clone(), texture.clone());
-                for cell in entry.cells.iter().filter_map(Weak::upgrade) {
-                    if cell.key.borrow().as_ref() == Some(&key) {
-                        cell.show(&texture);
-                    }
+                for cell in cells {
+                    cell.show(&texture, true);
                 }
             }
-            Err(err) => {
-                eprintln!("lantern: {}: {err}", key.0.display());
-                for cell in entry.cells.iter().filter_map(Weak::upgrade) {
-                    if cell.key.borrow().as_ref() == Some(&key) {
-                        cell.show_broken();
-                    }
+            (Kind::Preview, Ok(decoded)) => {
+                let texture = texture_from(decoded);
+                self.insert(key.clone(), texture.clone());
+                for cell in cells.filter(|c| !c.sharp.get()) {
+                    cell.show(&texture, false);
+                }
+            }
+            (Kind::Preview, Err(_)) => {
+                // No embedded preview: the skeleton stays until the full decode.
+                self.no_preview.borrow_mut().insert(key.0);
+            }
+            (Kind::Full, Err(err)) => {
+                if err != "canceled" {
+                    eprintln!("lantern: {}: {err}", key.0.display());
+                }
+                for cell in cells {
+                    cell.show_broken();
                 }
             }
         }

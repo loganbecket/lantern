@@ -16,6 +16,7 @@ image = { version = "0.25", default-features = false, features = ["jpeg", "png",
 kamadak-exif = "0.6"
 async-channel = "2"
 lru = "0.18"
+libc = "0.2"
 libheif-rs = { version = "3", default-features = false, features = ["v1_17"] }
 
 # `cargo deb` builds an installable package for Ubuntu / Pop!_OS.
