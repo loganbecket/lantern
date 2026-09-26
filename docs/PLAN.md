@@ -91,6 +91,12 @@ window in an already running Lantern.
 - 2026-09-26, same code on a CIFS network share (~12 MB/s): reads dominate,
   ~4 photos/s regardless of format. Nothing to fix in the decoder; the
   queue now favors what is on screen so the first rows fill first.
+- 2026-09-26, date taken. Reading the first 64 KB of a file finds the EXIF
+  date for 39 of 40 real iPhone HEICs; 1000 local files take ~40 ms. On the
+  share every file open costs ~100 ms and opens serialize, so the same pass
+  is ~90 s and competes with thumbnails. The pass now times its first reads
+  and backs off on slow folders, leaving modified-time order. On this share
+  modified time is within a day of the EXIF date for about 70% of files.
 
 - 2026-09-26, 12 MP JPEG at the 256 px bucket: ~16 ms median, 53 ms max,
   release build, generated test images.

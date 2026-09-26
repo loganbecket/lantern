@@ -1,6 +1,7 @@
 mod decode;
 mod grid;
 mod loader;
+mod photo;
 mod thumbs;
 mod window;
 
