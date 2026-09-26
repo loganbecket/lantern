@@ -1,11 +1,13 @@
-//! A pool of decode threads fed by a last-in-first-out queue.
+//! A pool of decode threads that always work on the photo nearest the
+//! viewport first.
 //!
-//! Newest requests are the cells the user is looking at right now, so they go
-//! first. Cells that scroll away cancel their request before a thread picks
-//! it up, so fast scrolling does not pile up wasted work.
+//! GTK creates cells for a good stretch above and below the visible area, so
+//! the queue is ordered by distance from the current scroll position rather
+//! than by arrival. Cells that scroll away cancel their request before a
+//! thread picks it up, so fast scrolling does not pile up wasted work.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 
@@ -14,6 +16,8 @@ use crate::decode::{self, Decoded};
 pub struct Job {
     pub path: PathBuf,
     pub target: u32,
+    /// Index of the photo in the grid, used to order the queue.
+    pub position: u32,
     pub cancel: Arc<AtomicBool>,
 }
 
@@ -26,20 +30,24 @@ pub struct Reply {
 #[derive(Clone)]
 pub struct Pool {
     queue: Arc<(Mutex<Vec<Job>>, Condvar)>,
+    /// Index of the first photo currently on screen.
+    focus: Arc<AtomicU32>,
 }
 
 impl Pool {
     pub fn new(replies: async_channel::Sender<Reply>) -> Self {
         let queue = Arc::new((Mutex::new(Vec::new()), Condvar::new()));
+        let focus = Arc::new(AtomicU32::new(0));
         let threads = thread::available_parallelism().map_or(4, |n| n.get()).saturating_sub(1).max(2);
 
         for _ in 0..threads {
             let queue = queue.clone();
+            let focus = focus.clone();
             let replies = replies.clone();
-            thread::spawn(move || worker(&queue, &replies));
+            thread::spawn(move || worker(&queue, &focus, &replies));
         }
 
-        Self { queue }
+        Self { queue, focus }
     }
 
     pub fn submit(&self, job: Job) {
@@ -47,9 +55,13 @@ impl Pool {
         jobs.lock().unwrap().push(job);
         ready.notify_one();
     }
+
+    pub fn set_focus(&self, position: u32) {
+        self.focus.store(position, Ordering::Relaxed);
+    }
 }
 
-fn worker(queue: &(Mutex<Vec<Job>>, Condvar), replies: &async_channel::Sender<Reply>) {
+fn worker(queue: &(Mutex<Vec<Job>>, Condvar), focus: &AtomicU32, replies: &async_channel::Sender<Reply>) {
     let (jobs, ready) = queue;
     loop {
         let job = {
@@ -57,7 +69,16 @@ fn worker(queue: &(Mutex<Vec<Job>>, Condvar), replies: &async_channel::Sender<Re
             while jobs.is_empty() {
                 jobs = ready.wait(jobs).unwrap();
             }
-            jobs.pop().unwrap()
+            // The queue stays small (a few hundred at most), so a scan beats
+            // keeping it sorted while the focus keeps moving.
+            let focus = focus.load(Ordering::Relaxed) as i64;
+            let nearest = jobs
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, j)| (j.position as i64 - focus).abs())
+                .map(|(i, _)| i)
+                .unwrap();
+            jobs.swap_remove(nearest)
         };
 
         if job.cancel.load(Ordering::Relaxed) {

@@ -53,7 +53,17 @@ impl PhotoGrid {
         let weak = grid.clone();
         grid.scrolled.hadjustment().connect_page_size_notify(move |_| weak.update_columns());
 
+        let weak = grid.clone();
+        grid.scrolled.vadjustment().connect_value_changed(move |_| weak.update_focus());
+
         grid
+    }
+
+    /// Tell the loader which photo is at the top of the viewport.
+    fn update_focus(&self) {
+        let row_height = (self.cell_size.get() + 2 * CELL_PADDING) as f64;
+        let row = (self.scrolled.vadjustment().value() / row_height).floor() as u32;
+        self.thumbs.set_focus(row * self.view.max_columns());
     }
 
     pub fn widget(&self) -> &gtk::ScrolledWindow {
@@ -132,7 +142,7 @@ impl PhotoGrid {
                 cell.picture.set_tooltip_text(Some(&name.to_string_lossy()));
                 let Some(path) = file.path() else { return };
                 let pixels = size as u32 * cell.picture.scale_factor().max(1) as u32;
-                thumbs.request(&cell, path, pixels);
+                thumbs.request(&cell, path, pixels, item.position());
             });
         }
 

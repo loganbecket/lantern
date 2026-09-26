@@ -24,12 +24,17 @@ pub fn decode(path: &Path, target: u32) -> Result<Decoded, String> {
 
 fn decode_inner(path: &Path, target: u32) -> Result<Decoded, String> {
     let data = std::fs::read(path).map_err(|e| e.to_string())?;
-    let orientation = exif_orientation(&data);
 
-    let image = if data.starts_with(&[0xFF, 0xD8]) {
-        decode_jpeg(&data, target)?
+    // libheif applies the file's own rotation, so HEIF skips the EXIF step.
+    let (image, orientation) = if data.starts_with(&[0xFF, 0xD8]) {
+        // libjpeg-turbo rejects some slightly malformed JPEGs that the
+        // tolerant pure-Rust decoder still opens.
+        let image = decode_jpeg(&data, target).or_else(|_| decode_other(&data, target))?;
+        (image, exif_orientation(&data))
+    } else if is_heif(&data) {
+        (decode_heif(&data, target)?, 1)
     } else {
-        decode_other(&data, target)?
+        (decode_other(&data, target)?, exif_orientation(&data))
     };
 
     let image = fit(image, target);
@@ -63,6 +68,51 @@ fn decode_jpeg(data: &[u8], target: u32) -> Result<RgbaImage, String> {
 
     RgbaImage::from_raw(scaled.width as u32, scaled.height as u32, pixels)
         .ok_or_else(|| "JPEG buffer size mismatch".to_string())
+}
+
+/// HEIF files start with an `ftyp` box naming a HEIF/AVIF brand.
+fn is_heif(data: &[u8]) -> bool {
+    const BRANDS: &[&[u8; 4]] = &[b"heic", b"heix", b"hevc", b"hevx", b"heim", b"heis", b"mif1", b"msf1", b"avif"];
+    data.len() >= 12 && &data[4..8] == b"ftyp" && BRANDS.contains(&data[8..12].try_into().unwrap())
+}
+
+/// HEIC (iPhone) can't be decoded at reduced size like JPEG, so this is the
+/// slow path. iPhone files carry a small embedded thumbnail, which is used
+/// whenever it is big enough for the target.
+fn decode_heif(data: &[u8], target: u32) -> Result<RgbaImage, String> {
+    use libheif_rs::{ColorSpace, HeifContext, ItemId, LibHeif, RgbChroma};
+
+    let mut context = HeifContext::read_from_bytes(data).map_err(|e| e.to_string())?;
+    // One thread per file; the pool already runs several files at once.
+    context.set_max_decoding_threads(1);
+    let primary = context.primary_image_handle().map_err(|e| e.to_string())?;
+
+    let lib = LibHeif::new();
+    let decode = |handle: &_| lib.decode(handle, ColorSpace::Rgb(RgbChroma::Rgba), None);
+
+    let mut ids = [0 as ItemId; 8];
+    let count = primary.thumbnail_ids(&mut ids);
+    let thumbnail = ids[..count]
+        .iter()
+        .filter_map(|id| primary.thumbnail(*id).ok())
+        .find(|t| t.width().max(t.height()) >= target)
+        // Some thumbnails are JPEG-coded, which older libheif can't decode;
+        // fall through to the full image rather than fail.
+        .and_then(|t| decode(&t).ok());
+
+    let image = match thumbnail {
+        Some(image) => image,
+        None => decode(&primary).map_err(|e| e.to_string())?,
+    };
+    let plane = image.planes().interleaved.ok_or("HEIF decode produced no pixels")?;
+
+    let (w, h) = (plane.width, plane.height);
+    let row = w as usize * 4;
+    let mut rgba = Vec::with_capacity(row * h as usize);
+    for y in 0..h as usize {
+        rgba.extend_from_slice(&plane.data[y * plane.stride..y * plane.stride + row]);
+    }
+    RgbaImage::from_raw(w, h, rgba).ok_or_else(|| "HEIF buffer size mismatch".to_string())
 }
 
 fn decode_other(data: &[u8], _target: u32) -> Result<RgbaImage, String> {

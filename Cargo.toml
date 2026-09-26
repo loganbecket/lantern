@@ -10,10 +10,11 @@ readme = "README.md"
 gtk = { package = "gtk4", version = "0.11", features = ["v4_14"] }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_5"] }
 turbojpeg = "1.5"
-image = { version = "0.25", default-features = false, features = ["png", "webp", "gif", "tiff", "bmp"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "gif", "tiff", "bmp"] }
 kamadak-exif = "0.6"
 async-channel = "2"
 lru = "0.18"
+libheif-rs = { version = "3", default-features = false, features = ["v1_17"] }
 
 [profile.release]
 lto = "thin"
