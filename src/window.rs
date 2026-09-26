@@ -1,7 +1,11 @@
+use std::rc::Rc;
+
 use adw::prelude::*;
 use gtk::{gio, glib};
 
+use crate::actions;
 use crate::grid::{PhotoGrid, SortBy};
+use crate::photo::PhotoInfo;
 use crate::viewer::Viewer;
 
 const MIN_CELL: f64 = 96.0;
@@ -41,6 +45,7 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
     header.pack_start(&open);
     header.pack_end(&size);
     header.pack_end(&sort);
+    header.pack_end(&file_buttons());
 
     let empty = adw::StatusPage::builder()
         .icon_name("folder-pictures-symbolic")
@@ -58,24 +63,29 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
 
     let grid_page = adw::NavigationPage::builder().child(&view).tag("grid").title("Lantern").build();
     let viewer = Viewer::new(grid.store().clone(), grid.thumbs().clone());
+    viewer.header().pack_end(&file_buttons());
     let nav = adw::NavigationView::new();
     nav.add(&grid_page);
     nav.add(viewer.page());
 
     {
         let nav = nav.clone();
+        let viewer = viewer.clone();
         grid.connect_activate(move |index| {
             viewer.show(index);
             nav.push_by_tag("viewer");
         });
     }
 
+    let toasts = adw::ToastOverlay::new();
+    toasts.set_child(Some(&nav));
+
     let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Lantern")
         .default_width(1200)
         .default_height(800)
-        .content(&nav)
+        .content(&toasts)
         .build();
 
     {
@@ -84,6 +94,7 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
     }
 
     add_sort_actions(&window, &grid);
+    add_file_actions(&window, &grid, &viewer, &nav, &toasts);
 
     let show_folder = {
         let grid = grid.clone();
@@ -112,6 +123,21 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
     }
 
     window
+}
+
+/// Trash, Download, Move/Rename, as a linked group for a header bar.
+fn file_buttons() -> gtk::Box {
+    let group = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+    group.add_css_class("linked");
+    for (icon, tooltip, action) in [
+        ("folder-download-symbolic", "Copy to Downloads (Ctrl+D)", "win.download"),
+        ("send-to-symbolic", "Move or Rename (F2)", "win.move"),
+        ("user-trash-symbolic", "Move to Trash (Delete)", "win.delete"),
+    ] {
+        let button = gtk::Button::builder().icon_name(icon).tooltip_text(tooltip).action_name(action).build();
+        group.append(&button);
+    }
+    group
 }
 
 /// `win.sort` (date | name) and `win.reverse` (bool), backing the sort menu.
@@ -150,4 +176,173 @@ fn add_sort_actions(window: &adw::ApplicationWindow, grid: &PhotoGrid) {
 
     window.add_action(&sort);
     window.add_action(&reverse);
+}
+
+/// `win.delete`, `win.download`, `win.move`: act on the selection in the
+/// grid, or on the photo on screen in the viewer.
+fn add_file_actions(
+    window: &adw::ApplicationWindow,
+    grid: &PhotoGrid,
+    viewer: &Rc<Viewer>,
+    nav: &adw::NavigationView,
+    toasts: &adw::ToastOverlay,
+) {
+    let delete = gio::SimpleAction::new("delete", None);
+    let download = gio::SimpleAction::new("download", None);
+    let mv = gio::SimpleAction::new("move", None);
+    let all = [delete.clone(), download.clone(), mv.clone()];
+
+    let in_viewer = {
+        let nav = nav.clone();
+        move || nav.visible_page().and_then(|p| p.tag()).as_deref() == Some("viewer")
+    };
+
+    // Whose files: the viewer's one photo, or the grid's selection.
+    let targets = {
+        let grid = grid.clone();
+        let viewer = viewer.clone();
+        let in_viewer = in_viewer.clone();
+        move || -> Vec<PhotoInfo> {
+            if in_viewer() { viewer.current().into_iter().collect() } else { grid.selected() }
+        }
+    };
+
+    // Buttons light up only when there is something to act on.
+    let refresh = {
+        let targets = targets.clone();
+        move || {
+            let enabled = !targets().is_empty();
+            for action in &all {
+                action.set_enabled(enabled);
+            }
+        }
+    };
+    refresh();
+    {
+        let refresh = refresh.clone();
+        grid.connect_selection_changed(move || refresh());
+    }
+    {
+        let refresh = refresh.clone();
+        nav.connect_visible_page_notify(move |_| refresh());
+    }
+
+    // After files change under us: fix up the viewer, then report.
+    let finish = {
+        let grid = grid.clone();
+        let viewer = viewer.clone();
+        let nav = nav.clone();
+        let toasts = toasts.clone();
+        let in_viewer = in_viewer.clone();
+        let refresh = refresh.clone();
+        move |message: String| {
+            if in_viewer() && !viewer.refresh() {
+                nav.pop();
+            }
+            refresh();
+            let _ = &grid;
+            toasts.add_toast(adw::Toast::new(&message));
+        }
+    };
+
+    {
+        let grid = grid.clone();
+        let targets = targets.clone();
+        let finish = finish.clone();
+        delete.connect_activate(move |_, _| {
+            let files: Vec<gio::File> = targets().into_iter().map(|p| p.file).collect();
+            let grid = grid.clone();
+            let finish = finish.clone();
+            glib::spawn_future_local(async move {
+                let outcome = actions::trash(files).await;
+                let done: Vec<gio::File> = outcome.iter().filter(|(_, r)| r.is_ok()).map(|(f, _)| f.clone()).collect();
+                grid.remove_files(&done);
+                finish(summarize(&outcome, "Moved", "to Trash"));
+            });
+        });
+    }
+
+    {
+        let targets = targets.clone();
+        let finish = finish.clone();
+        download.connect_activate(move |_, _| {
+            let files: Vec<gio::File> = targets().into_iter().map(|p| p.file).collect();
+            let finish = finish.clone();
+            glib::spawn_future_local(async move {
+                let outcome = actions::download(files).await;
+                finish(summarize(&outcome, "Copied", "to Downloads"));
+            });
+        });
+    }
+
+    {
+        let window = window.clone();
+        let grid = grid.clone();
+        mv.connect_activate(move |_, _| {
+            let photos = targets();
+            let grid = grid.clone();
+            let finish = finish.clone();
+            let dialog = gtk::FileDialog::builder().modal(true).build();
+            if let Some(dir) = grid.dir() {
+                dialog.set_initial_folder(Some(&dir));
+            }
+
+            if let [photo] = photos.as_slice() {
+                // One photo: pick a folder and a name in one go.
+                dialog.set_title("Move or Rename");
+                dialog.set_initial_name(Some(&photo.name));
+                let source = photo.file.clone();
+                dialog.save(Some(&window), gio::Cancellable::NONE, move |result| {
+                    let Ok(target) = result else { return };
+                    glib::spawn_future_local(async move {
+                        let result = actions::move_to(&source, target).await;
+                        match &result {
+                            Ok(moved) if moved.parent().is_some_and(|p| grid.dir().is_some_and(|d| d.equal(&p))) => {
+                                grid.replace_file(&source, moved.clone());
+                            }
+                            Ok(_) => grid.remove_files(&[source.clone()]),
+                            Err(_) => {}
+                        }
+                        finish(summarize(&[(source, result)], "Moved", ""));
+                    });
+                });
+            } else {
+                dialog.set_title("Move to Folder");
+                let files: Vec<gio::File> = photos.into_iter().map(|p| p.file).collect();
+                dialog.select_folder(Some(&window), gio::Cancellable::NONE, move |result| {
+                    let Ok(folder) = result else { return };
+                    glib::spawn_future_local(async move {
+                        let outcome = actions::move_into(files, folder.clone()).await;
+                        if !grid.dir().is_some_and(|d| d.equal(&folder)) {
+                            let done: Vec<gio::File> = outcome.iter().filter(|(_, r)| r.is_ok()).map(|(f, _)| f.clone()).collect();
+                            grid.remove_files(&done);
+                        }
+                        finish(summarize(&outcome, "Moved", ""));
+                    });
+                });
+            }
+        });
+    }
+
+    window.add_action(&delete);
+    window.add_action(&download);
+    window.add_action(&mv);
+    let app = window.application().unwrap();
+    app.set_accels_for_action("win.delete", &["Delete"]);
+    app.set_accels_for_action("win.download", &["<Control>d"]);
+    app.set_accels_for_action("win.move", &["F2"]);
+}
+
+/// "Moved 3 photos to Trash", or the first error if anything failed.
+fn summarize(outcome: &[(gio::File, Result<gio::File, String>)], verb: &str, suffix: &str) -> String {
+    if let Some((file, Err(err))) = outcome.iter().find(|(_, r)| r.is_err()) {
+        let name = file.basename().unwrap_or_default().to_string_lossy().into_owned();
+        return format!("Couldn't move {name}: {err}");
+    }
+    let count = outcome.len();
+    let what = match (count, outcome.first()) {
+        (1, Some((_, Ok(target)))) => target.basename().unwrap_or_default().to_string_lossy().into_owned(),
+        _ => format!("{count} photos"),
+    };
+    format!("{verb} {what} {suffix}").trim_end().to_string()
 }
