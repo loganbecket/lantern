@@ -26,7 +26,6 @@ install: build
 	for s in $(SIZES); do \
 	  install -Dm644 data/icons/hicolor/$${s}x$${s}/apps/$(APP_ID).png $(ICONS)/$${s}x$${s}/apps/$(APP_ID).png; \
 	done
-	install -Dm644 data/icons/hicolor/scalable/apps/$(APP_ID).svg $(ICONS)/scalable/apps/$(APP_ID).svg
 	install -Dm644 data/$(APP_ID).metainfo.xml $(META)/$(APP_ID).metainfo.xml
 	-update-desktop-database $(APPS) 2>/dev/null
 	-gtk-update-icon-cache -q -t $(ICONS) 2>/dev/null
@@ -34,7 +33,6 @@ install: build
 uninstall:
 	rm -f $(BIN)/lantern $(APPS)/$(APP_ID).desktop $(META)/$(APP_ID).metainfo.xml
 	for s in $(SIZES); do rm -f $(ICONS)/$${s}x$${s}/apps/$(APP_ID).png; done
-	rm -f $(ICONS)/scalable/apps/$(APP_ID).svg
 	-update-desktop-database $(APPS) 2>/dev/null
 	-gtk-update-icon-cache -q -t $(ICONS) 2>/dev/null
 
