@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.loganbecket.Lantern</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Lantern</name>
+  <summary>Browse your photos with big thumbnails</summary>
+  <description>
+    <p>
+      Lantern is a fast photo browser for Linux. Open a folder and scroll
+      through thousands of photos, including iPhone HEIC files, with
+      thumbnails as large as you like, sorted by the date they were taken.
+      Nothing is indexed and nothing is cached to disk.
+    </p>
+    <p>
+      When you find the photo you were looking for, move it to the trash,
+      copy it to your Downloads folder, or move and rename it. That is the
+      whole feature list.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.loganbecket.Lantern.desktop</launchable>
+  <url type="homepage">https://github.com/loganbecket/lantern</url>
+  <url type="bugtracker">https://github.com/loganbecket/lantern/issues</url>
+  <developer id="io.github.loganbecket">
+    <name>Logan Becket</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">768</display_length>
+  </requires>
+  <releases>
+    <release version="0.1.0" date="2026-09-26"/>
+  </releases>
+</component>

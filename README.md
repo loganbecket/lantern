@@ -6,6 +6,22 @@ Open a folder and scroll through thousands of photos, including iPhone HEIC
 files, with no indexing and nothing cached to disk. Delete (to trash), copy to
 Downloads, or move and rename, and that's it.
 
+## Using it
+
+Open a folder (or run `lantern ~/Pictures`). Subfolders come first, then
+photos sorted by date taken. Double-click a photo to see it full size and use
+the arrow keys to step through the folder.
+
+| Keys | What |
+| --- | --- |
+| Ctrl+O | Open a folder |
+| Alt+Up | Parent folder |
+| Ctrl+scroll, Ctrl+plus / Ctrl+minus, Ctrl+0 | Thumbnail size |
+| Delete | Move selected photos to the trash |
+| Ctrl+D | Copy selected photos to Downloads |
+| F2 | Move or rename selected photos |
+| Escape | Back to the grid |
+
 ## Install
 
 ```
