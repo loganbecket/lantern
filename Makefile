@@ -7,8 +7,9 @@ PREFIX ?= $(HOME)/.local
 APP_ID  = io.github.loganbecket.Lantern
 BIN     = $(PREFIX)/bin
 APPS    = $(PREFIX)/share/applications
-ICONS   = $(PREFIX)/share/icons/hicolor/scalable/apps
+ICONS   = $(PREFIX)/share/icons/hicolor
 META    = $(PREFIX)/share/metainfo
+SIZES   = 16 32 48 64 128 256 512
 
 .PHONY: build install uninstall deb clean
 
@@ -22,14 +23,20 @@ deb:
 install: build
 	install -Dm755 target/release/lantern $(BIN)/lantern
 	install -Dm644 data/$(APP_ID).desktop $(APPS)/$(APP_ID).desktop
-	install -Dm644 data/$(APP_ID).svg $(ICONS)/$(APP_ID).svg
+	for s in $(SIZES); do \
+	  install -Dm644 data/icons/hicolor/$${s}x$${s}/apps/$(APP_ID).png $(ICONS)/$${s}x$${s}/apps/$(APP_ID).png; \
+	done
+	install -Dm644 data/icons/hicolor/scalable/apps/$(APP_ID).svg $(ICONS)/scalable/apps/$(APP_ID).svg
 	install -Dm644 data/$(APP_ID).metainfo.xml $(META)/$(APP_ID).metainfo.xml
 	-update-desktop-database $(APPS) 2>/dev/null
-	-gtk-update-icon-cache -q -t $(PREFIX)/share/icons/hicolor 2>/dev/null
+	-gtk-update-icon-cache -q -t $(ICONS) 2>/dev/null
 
 uninstall:
-	rm -f $(BIN)/lantern $(APPS)/$(APP_ID).desktop $(ICONS)/$(APP_ID).svg $(META)/$(APP_ID).metainfo.xml
+	rm -f $(BIN)/lantern $(APPS)/$(APP_ID).desktop $(META)/$(APP_ID).metainfo.xml
+	for s in $(SIZES); do rm -f $(ICONS)/$${s}x$${s}/apps/$(APP_ID).png; done
+	rm -f $(ICONS)/scalable/apps/$(APP_ID).svg
 	-update-desktop-database $(APPS) 2>/dev/null
+	-gtk-update-icon-cache -q -t $(ICONS) 2>/dev/null
 
 clean:
 	cargo clean
