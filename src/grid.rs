@@ -87,29 +87,64 @@ impl PhotoGrid {
         let weak = grid.clone();
         grid.scrolled.vadjustment().connect_value_changed(move |_| weak.update_focus());
 
-        grid.speed_up_wheel();
+        grid.speed_up_scrolling();
         grid
     }
 
-    /// GTK scrolls a fixed ~75 px per wheel notch, which is a fraction of a
-    /// row of big thumbnails. Make a notch move a whole row instead (at
-    /// least a quarter of the viewport). Touchpads keep GTK's smooth,
-    /// kinetic behavior.
-    fn speed_up_wheel(&self) {
-        let scroll = gtk::EventControllerScroll::new(gtk::EventControllerScrollFlags::VERTICAL);
+    /// GTK's scrolling is tuned for text: ~75 px per wheel notch and a
+    /// gentle touchpad. Big thumbnails want far more. A wheel notch moves
+    /// two rows (at least half the viewport); touchpad and smooth-wheel
+    /// motion is multiplied, with a simple glide after a flick.
+    fn speed_up_scrolling(&self) {
+        const TOUCHPAD_GAIN: f64 = 3.0;
+        const GLIDE_FRICTION: f64 = 0.95;
+
+        let flags = gtk::EventControllerScrollFlags::VERTICAL | gtk::EventControllerScrollFlags::KINETIC;
+        let scroll = gtk::EventControllerScroll::new(flags);
         scroll.set_propagation_phase(gtk::PropagationPhase::Capture);
+        // Bumped on every scroll so a glide in progress stops when the user
+        // touches the pad again.
+        let generation = Rc::new(Cell::new(0u32));
+
         let grid = self.clone();
+        let touched = generation.clone();
         scroll.connect_scroll(move |controller, _, dy| {
-            let state = controller.current_event_state();
-            if controller.unit() != gtk::gdk::ScrollUnit::Wheel || state.contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+            if controller.current_event_state().contains(gtk::gdk::ModifierType::CONTROL_MASK) {
                 return glib::Propagation::Proceed;
             }
+            touched.set(touched.get().wrapping_add(1));
             let adjustment = grid.scrolled.vadjustment();
-            let row = (grid.cell_size.get() + 2 * CELL_PADDING) as f64;
-            let step = row.max(adjustment.page_size() / 4.0);
-            adjustment.set_value(adjustment.value() + dy * step);
+            let delta = if controller.unit() == gtk::gdk::ScrollUnit::Wheel {
+                let row = (grid.cell_size.get() + 2 * CELL_PADDING) as f64;
+                dy * (2.0 * row).max(adjustment.page_size() / 2.0)
+            } else {
+                dy * TOUCHPAD_GAIN
+            };
+            adjustment.set_value(adjustment.value() + delta);
             glib::Propagation::Stop
         });
+
+        // After a touchpad flick GTK reports the velocity; keep gliding with it.
+        let grid = self.clone();
+        scroll.connect_decelerate(move |_, _, velocity_y| {
+            let adjustment = grid.scrolled.vadjustment();
+            let velocity = Rc::new(Cell::new(velocity_y * TOUCHPAD_GAIN));
+            let last = Rc::new(Cell::new(None::<i64>));
+            let started = generation.get();
+            let generation = generation.clone();
+            grid.scrolled.add_tick_callback(move |_, clock| {
+                if generation.get() != started {
+                    return glib::ControlFlow::Break;
+                }
+                let now = clock.frame_time();
+                let dt = last.replace(Some(now)).map_or(1.0 / 60.0, |t| (now - t) as f64 / 1_000_000.0);
+                let v = velocity.get() * GLIDE_FRICTION.powf(dt * 60.0);
+                velocity.set(v);
+                adjustment.set_value(adjustment.value() + v * dt);
+                if v.abs() < 20.0 { glib::ControlFlow::Break } else { glib::ControlFlow::Continue }
+            });
+        });
+
         self.scrolled.add_controller(scroll);
     }
 
