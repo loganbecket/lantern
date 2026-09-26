@@ -1,7 +1,7 @@
 use adw::prelude::*;
-use gtk::gio;
+use gtk::{gio, glib};
 
-use crate::grid::PhotoGrid;
+use crate::grid::{PhotoGrid, SortBy};
 
 const MIN_CELL: f64 = 96.0;
 const MAX_CELL: f64 = 640.0;
@@ -21,10 +21,25 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
 
     let title = adw::WindowTitle::new("Lantern", "");
 
+    let sort_menu = gio::Menu::new();
+    let by = gio::Menu::new();
+    by.append(Some("Date Taken"), Some("win.sort::date"));
+    by.append(Some("Name"), Some("win.sort::name"));
+    sort_menu.append_section(None, &by);
+    let order = gio::Menu::new();
+    order.append(Some("Reverse Order"), Some("win.reverse"));
+    sort_menu.append_section(None, &order);
+    let sort = gtk::MenuButton::builder()
+        .icon_name("view-sort-descending-symbolic")
+        .tooltip_text("Sort")
+        .menu_model(&sort_menu)
+        .build();
+
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&title));
     header.pack_start(&open);
     header.pack_end(&size);
+    header.pack_end(&sort);
 
     let empty = adw::StatusPage::builder()
         .icon_name("folder-pictures-symbolic")
@@ -53,6 +68,8 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
         size.connect_value_changed(move |s| grid.set_cell_size(s.value() as i32));
     }
 
+    add_sort_actions(&window, &grid);
+
     let show_folder = {
         let grid = grid.clone();
         move |dir: gio::File| {
@@ -80,4 +97,42 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
     }
 
     window
+}
+
+/// `win.sort` (date | name) and `win.reverse` (bool), backing the sort menu.
+fn add_sort_actions(window: &adw::ApplicationWindow, grid: &PhotoGrid) {
+    let sort = gio::SimpleAction::new_stateful("sort", Some(glib::VariantTy::STRING), &"date".to_variant());
+    let reverse = gio::SimpleAction::new_stateful("reverse", None, &false.to_variant());
+
+    let apply = {
+        let grid = grid.clone();
+        let sort = sort.clone();
+        let reverse = reverse.clone();
+        move || {
+            let by = match sort.state().and_then(|s| s.get::<String>()).as_deref() {
+                Some("name") => SortBy::Name,
+                _ => SortBy::Date,
+            };
+            let reversed = reverse.state().and_then(|s| s.get::<bool>()).unwrap_or(false);
+            grid.set_sort(by, reversed);
+        }
+    };
+
+    {
+        let apply = apply.clone();
+        sort.connect_change_state(move |action, state| {
+            if let Some(state) = state {
+                action.set_state(state);
+                apply();
+            }
+        });
+    }
+    reverse.connect_activate(move |action, _| {
+        let current = action.state().and_then(|s| s.get::<bool>()).unwrap_or(false);
+        action.set_state(&(!current).to_variant());
+        apply();
+    });
+
+    window.add_action(&sort);
+    window.add_action(&reverse);
 }
