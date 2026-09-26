@@ -164,13 +164,24 @@ impl PhotoGrid {
     }
 
     /// Take photos out of the grid after they were trashed or moved away.
+    ///
+    /// Focus and selection move to whatever now sits where the first removed
+    /// photo was. Without that, GTK would move focus to the first cell and
+    /// scroll the grid back to the top.
     pub fn remove_files(&self, files: &[gio::File]) {
         let gone = |f: &gio::File| files.iter().any(|g| g.equal(f));
         self.photos.borrow_mut().retain(|p| !gone(&p.file));
+        let mut first_removed = None;
         for index in (0..self.store.n_items()).rev() {
             if self.entry_at(index).is_some_and(|e| e.photo().is_some() && gone(e.file())) {
                 self.store.remove(index);
+                first_removed = Some(index);
             }
+        }
+        let count = self.store.n_items();
+        if let (Some(index), true) = (first_removed, count > 0) {
+            let flags = gtk::ListScrollFlags::FOCUS | gtk::ListScrollFlags::SELECT;
+            self.view.scroll_to(index.min(count - 1), flags, None);
         }
     }
 
