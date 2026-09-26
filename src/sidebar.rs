@@ -6,23 +6,62 @@ use std::rc::Rc;
 use adw::prelude::*;
 use gtk::{gio, glib};
 
-/// One row of the tree: a folder and the name to show for it.
+/// One row of the tree: a folder, the name to show for it, and an icon
+/// for the top-level places (subfolders all get the plain folder icon).
 #[derive(Clone, Debug)]
 struct Node {
     file: gio::File,
     name: String,
+    icon: Option<gio::Icon>,
 }
+
+impl Node {
+    fn folder(file: gio::File, name: String) -> Self {
+        Self { file, name, icon: None }
+    }
+
+    fn place(path: impl AsRef<std::path::Path>, name: &str, icon: &str) -> Self {
+        Self { file: gio::File::for_path(path), name: name.into(), icon: Some(gio::ThemedIcon::new(icon).upcast()) }
+    }
+
+    fn mount(mount: &gio::Mount) -> Self {
+        Self { file: mount.root(), name: mount.name().into(), icon: Some(mount.symbolic_icon()) }
+    }
+}
+
+/// How many fixed rows sit above the mounted drives.
+const FIXED_ROOTS: u32 = 2;
 
 pub struct FolderTree {
     widget: gtk::ScrolledWindow,
     selection: gtk::SingleSelection,
+    /// Kept alive so mount and unmount events keep arriving.
+    _volumes: gio::VolumeMonitor,
 }
 
 impl FolderTree {
     pub fn new() -> Rc<Self> {
         let roots = gio::ListStore::new::<glib::BoxedAnyObject>();
-        roots.append(&glib::BoxedAnyObject::new(Node { file: gio::File::for_path(glib::home_dir()), name: "Home".into() }));
-        roots.append(&glib::BoxedAnyObject::new(Node { file: gio::File::for_path("/"), name: "Computer".into() }));
+        roots.append(&glib::BoxedAnyObject::new(Node::place(glib::home_dir(), "Home", "user-home-symbolic")));
+        roots.append(&glib::BoxedAnyObject::new(Node::place("/", "Computer", "drive-harddisk-symbolic")));
+
+        // Mounted drives and network shares, kept current as they come and go.
+        let volumes = gio::VolumeMonitor::get();
+        let refresh_mounts = {
+            let roots = roots.clone();
+            move |volumes: &gio::VolumeMonitor| {
+                let mut mounts: Vec<gio::Mount> = volumes.mounts().into_iter().filter(|m| !m.is_shadowed()).collect();
+                mounts.sort_by_cached_key(|m| m.name().to_lowercase());
+                let items: Vec<glib::BoxedAnyObject> = mounts.iter().map(|m| glib::BoxedAnyObject::new(Node::mount(m))).collect();
+                roots.splice(FIXED_ROOTS, roots.n_items() - FIXED_ROOTS, &items);
+            }
+        };
+        refresh_mounts(&volumes);
+        {
+            let refresh = refresh_mounts.clone();
+            volumes.connect_mount_added(move |v, _| refresh(v));
+        }
+        volumes.connect_mount_removed(move |v, _| refresh_mounts(v));
 
         // Every folder gets an expander; its children are listed when opened.
         let tree = gtk::TreeListModel::new(roots, false, false, |item| {
@@ -51,8 +90,15 @@ impl FolderTree {
             let expander = item.child().and_downcast::<gtk::TreeExpander>().unwrap();
             expander.set_list_row(Some(&row));
             let node = row.item().and_downcast::<glib::BoxedAnyObject>().unwrap();
-            let label = expander.child().and_downcast::<gtk::Box>().unwrap().last_child().and_downcast::<gtk::Label>().unwrap();
-            label.set_text(&node.borrow::<Node>().name);
+            let row = expander.child().and_downcast::<gtk::Box>().unwrap();
+            let icon = row.first_child().and_downcast::<gtk::Image>().unwrap();
+            let label = row.last_child().and_downcast::<gtk::Label>().unwrap();
+            let node = node.borrow::<Node>();
+            match &node.icon {
+                Some(gicon) => icon.set_from_gicon(gicon),
+                None => icon.set_icon_name(Some("folder-symbolic")),
+            }
+            label.set_text(&node.name);
         });
 
         let view = gtk::ListView::builder()
@@ -67,7 +113,7 @@ impl FolderTree {
             .width_request(240)
             .build();
 
-        Rc::new(Self { widget, selection })
+        Rc::new(Self { widget, selection, _volumes: volumes })
     }
 
     pub fn widget(&self) -> &gtk::ScrolledWindow {
@@ -108,7 +154,7 @@ fn fill_children(store: gio::ListStore, dir: gio::File) {
             for info in batch {
                 if info.file_type() == gio::FileType::Directory && !info.is_hidden() {
                     let name = info.name();
-                    folders.push(Node { file: dir.child(&name), name: name.to_string_lossy().into_owned() });
+                    folders.push(Node::folder(dir.child(&name), name.to_string_lossy().into_owned()));
                 }
             }
         }
