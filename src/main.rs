@@ -10,10 +10,14 @@ use gtk::gio;
 pub const APP_ID: &str = "io.github.loganbecket.Lantern";
 
 fn main() -> gtk::glib::ExitCode {
-    let app = adw::Application::builder()
-        .application_id(APP_ID)
-        .flags(gio::ApplicationFlags::HANDLES_OPEN)
-        .build();
+    // Normally one instance handles every launch. With LANTERN_DEBUG set,
+    // each launch is its own process so a test run doesn't open a window in
+    // an already running Lantern.
+    let mut flags = gio::ApplicationFlags::HANDLES_OPEN;
+    if std::env::var_os("LANTERN_DEBUG").is_some() {
+        flags |= gio::ApplicationFlags::NON_UNIQUE;
+    }
+    let app = adw::Application::builder().application_id(APP_ID).flags(flags).build();
     app.connect_startup(|_| load_css());
     app.connect_activate(|app| window::build(app, None).present());
     // `lantern ~/Pictures`, or "Open with Lantern" from a file manager.

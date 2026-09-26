@@ -88,9 +88,15 @@ impl Thumbnails {
         this
     }
 
+    /// Tell the decode pool which photo is at the top of the viewport so it
+    /// works outward from there.
+    pub fn set_focus(&self, position: u32) {
+        self.pool.set_focus(position);
+    }
+
     /// Show `path` in `cell` at roughly `size` pixels, now if cached or
-    /// once decoded otherwise.
-    pub fn request(&self, cell: &Rc<CellState>, path: PathBuf, size: u32) {
+    /// once decoded otherwise. `position` is the photo's index in the grid.
+    pub fn request(&self, cell: &Rc<CellState>, path: PathBuf, size: u32, position: u32) {
         let key = (path, bucket(size));
         *cell.key.borrow_mut() = Some(key.clone());
 
@@ -106,7 +112,7 @@ impl Thumbnails {
             return;
         }
         let cancel = Arc::new(AtomicBool::new(false));
-        self.pool.submit(Job { path: key.0.clone(), target: key.1, cancel: cancel.clone() });
+        self.pool.submit(Job { path: key.0.clone(), target: key.1, position, cancel: cancel.clone() });
         waiting.insert(key, Waiting { cancel, cells: vec![Rc::downgrade(cell)] });
     }
 

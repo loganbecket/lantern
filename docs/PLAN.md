@@ -36,8 +36,9 @@ cloud anything, a library database.
 - **HEIC (iPhone).** Use the embedded preview image when it is big enough for
   the current cell size; otherwise decode the full image with libheif. This is
   the slow path and the main performance risk — measure early.
-- **Work pool.** Decodes run on a thread pool sized to the CPU. Requests for
-  cells that scroll off screen are canceled before they start.
+- **Work pool.** Decodes run on a thread pool sized to the CPU, always taking
+  the photo nearest the current scroll position next. Requests for cells that
+  scroll off screen are canceled before they start.
 - **In-memory LRU** of decoded textures for the session only, so scrolling back
   up is instant. Nothing is persisted.
 - **EXIF orientation** applied at decode time.
@@ -79,7 +80,17 @@ nasm) because the version Ubuntu 24.04 ships is too old for its API.
 
 ## Measurements
 
-Set `LANTERN_DEBUG=1` to log every decode with its time in milliseconds.
+Set `LANTERN_DEBUG=1` to log every decode with its time in milliseconds. It
+also makes each launch a separate instance, so a test run does not open a
+window in an already running Lantern.
+
+- 2026-09-26, iPhone HEIC, 40 real files on local disk, 256 px bucket
+  (embedded thumbnail): 23 ms median. 640 px bucket (full HEVC decode, 7
+  threads busy): 1.3 s median, 73 ms min. Full decode is the slow path;
+  a follow-up could show the embedded thumbnail first and sharpen later.
+- 2026-09-26, same code on a CIFS network share (~12 MB/s): reads dominate,
+  ~4 photos/s regardless of format. Nothing to fix in the decoder; the
+  queue now favors what is on screen so the first rows fill first.
 
 - 2026-09-26, 12 MP JPEG at the 256 px bucket: ~16 ms median, 53 ms max,
   release build, generated test images.
