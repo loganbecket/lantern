@@ -3,9 +3,7 @@
 **Find the photo you're looking for.** A fast Linux photo browser with big,
 adjustable thumbnails, no library, no database, and nothing cached to disk.
 
-<!-- Screenshot: a folder of real photos at a large thumbnail size, folder
-     tree open on the left. Replace this comment with:
-     ![Lantern browsing a folder of photos](docs/screenshot.png) -->
+![Lantern browsing a folder of photos on a network share, folder tree open](docs/screenshot.png)
 
 You have thousands of photos in folders, and someone just asked for "that
 picture from the beach." File names are useless. Every photo manager wants
