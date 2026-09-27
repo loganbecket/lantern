@@ -47,10 +47,11 @@ pub struct PhotoGrid {
     reverse: Rc<Cell<bool>>,
     /// Called once a folder's listing is in, with whether it had anything.
     on_loaded: Rc<RefCell<Option<Box<dyn Fn(bool)>>>>,
-    /// The right-click menu and the entry it was opened on.
-    menu: gtk::PopoverMenu,
-    photo_menu: gio::MenuModel,
-    folder_menu: gio::MenuModel,
+    /// The right-click menus (one per kind of entry: swapping models on a
+    /// single popover leaves it sized for the previous one, which shows
+    /// as a scrolling menu) and the entry one was opened on.
+    photo_menu: gtk::PopoverMenu,
+    folder_menu: gtk::PopoverMenu,
     context_position: Rc<Cell<u32>>,
 }
 
@@ -88,8 +89,13 @@ impl PhotoGrid {
         photo_menu.append_section(None, &files);
         let folder_menu = gio::Menu::new();
         folder_menu.append(Some("Open"), Some("grid.open"));
-        let menu = gtk::PopoverMenu::builder().has_arrow(false).halign(gtk::Align::Start).build();
-        menu.set_parent(&view);
+        let popover = |model: &gio::Menu| {
+            let menu = gtk::PopoverMenu::builder().menu_model(model).has_arrow(false).halign(gtk::Align::Start).build();
+            menu.set_parent(&view);
+            menu
+        };
+        let photo_menu = popover(&photo_menu);
+        let folder_menu = popover(&folder_menu);
 
         let grid = Self {
             container,
@@ -106,9 +112,8 @@ impl PhotoGrid {
             sort_by: Rc::new(Cell::new(SortBy::Date)),
             reverse: Rc::new(Cell::new(false)),
             on_loaded: Rc::default(),
-            menu,
-            photo_menu: photo_menu.upcast(),
-            folder_menu: folder_menu.upcast(),
+            photo_menu,
+            folder_menu,
             context_position: Rc::default(),
         };
         grid.view.set_factory(Some(&grid.make_factory()));
@@ -214,10 +219,9 @@ impl PhotoGrid {
             self.selection.select_item(position, true);
         }
         self.context_position.set(position);
-        let model = if entry.photo().is_some() { &self.photo_menu } else { &self.folder_menu };
-        self.menu.set_menu_model(Some(model));
-        self.menu.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
-        self.menu.popup();
+        let menu = if entry.photo().is_some() { &self.photo_menu } else { &self.folder_menu };
+        menu.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        menu.popup();
     }
 
     /// The entries in their current order.
