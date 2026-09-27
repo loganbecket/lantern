@@ -229,6 +229,18 @@ impl Thumbnails {
         self.no_preview.borrow_mut().remove(path);
     }
 
+    /// The photo on disk was turned a quarter turn: turn every cached copy
+    /// the same way, so nothing needs to be read or decoded again.
+    pub fn rotate_cached(&self, path: &Path, clockwise: bool) {
+        let mut cache = self.cache.borrow_mut();
+        for bucket in BUCKETS.iter().chain([PREVIEW].iter()) {
+            let key = (path.to_path_buf(), *bucket);
+            if let Some(texture) = cache.get(&key).cloned() {
+                cache.put(key, rotate_texture(&texture, clockwise));
+            }
+        }
+    }
+
     /// The largest decoded version of `path` already in memory, at any size,
     /// down to the embedded preview.
     pub fn any_cached(&self, path: &Path) -> Option<gdk::Texture> {
@@ -376,6 +388,19 @@ fn bucket(size: u32) -> u32 {
 
 fn texture_bytes(texture: &gdk::Texture) -> usize {
     texture.width() as usize * texture.height() as usize * 4
+}
+
+/// A quarter turn of a texture's pixels, same size in bytes.
+fn rotate_texture(texture: &gdk::Texture, clockwise: bool) -> gdk::Texture {
+    let (w, h) = (texture.width() as u32, texture.height() as u32);
+    let mut pixels = vec![0u8; (w * h * 4) as usize];
+    texture.download(&mut pixels, (w * 4) as usize);
+    let image = image::RgbaImage::from_raw(w, h, pixels).expect("download filled the buffer");
+    let turned = if clockwise { image::imageops::rotate90(&image) } else { image::imageops::rotate270(&image) };
+    // download() hands back native-endian premultiplied ARGB32; rotating
+    // whole pixels keeps the format, so recreate it as exactly that.
+    gdk::MemoryTexture::new(h as i32, w as i32, gdk::MemoryFormat::B8g8r8a8Premultiplied, &glib::Bytes::from_owned(turned.into_raw()), (h * 4) as usize)
+        .upcast()
 }
 
 fn texture_from(decoded: Decoded) -> gdk::Texture {

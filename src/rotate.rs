@@ -7,7 +7,10 @@
 //! Other formats can't be rotated without re-encoding and are refused.
 //! The file's modified time is preserved so date order doesn't change.
 
+use std::io::{Seek, SeekFrom, Write};
 use std::path::Path;
+
+use crate::decode::PREVIEW_BYTES;
 
 /// EXIF orientation after one more quarter turn on screen, clockwise and
 /// counter-clockwise, for each of the eight orientations.
@@ -15,13 +18,31 @@ const CLOCKWISE: [u8; 9] = [0, 6, 7, 8, 5, 2, 3, 4, 1];
 const COUNTER_CLOCKWISE: [u8; 9] = [0, 8, 5, 6, 7, 4, 1, 2, 3];
 
 pub fn rotate(path: &Path, clockwise: bool) -> Result<(), String> {
-    let mut data = std::fs::read(path).map_err(|e| e.to_string())?;
     let modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    let table = if clockwise { &CLOCKWISE } else { &COUNTER_CLOCKWISE };
 
+    // The common case first: a JPEG with an orientation tag near the start.
+    // Two bytes change, so they are written straight into the file; no
+    // full read, no full write. Over Wi-Fi that is the difference between
+    // instant and a second or more.
+    let prefix = crate::decode::read_prefix(path, PREVIEW_BYTES).ok_or("can't read the file")?;
+    if prefix.starts_with(&[0xFF, 0xD8]) {
+        if let Some((at, big_endian, current)) = exif_orientation_slot(&prefix) {
+            let next = table[current as usize];
+            let bytes = if big_endian { (next as u16).to_be_bytes() } else { (next as u16).to_le_bytes() };
+            let mut file = std::fs::File::options().write(true).open(path).map_err(|e| e.to_string())?;
+            file.seek(SeekFrom::Start(at as u64)).and_then(|_| file.write_all(&bytes)).map_err(|e| e.to_string())?;
+            if let Some(modified) = modified {
+                let _ = file.set_modified(modified);
+            }
+            return Ok(());
+        }
+    }
+
+    let mut data = std::fs::read(path).map_err(|e| e.to_string())?;
     let output = if data.starts_with(&[0xFF, 0xD8]) {
         match exif_orientation_slot(&data) {
             Some((at, big_endian, current)) => {
-                let table = if clockwise { &CLOCKWISE } else { &COUNTER_CLOCKWISE };
                 let next = table[current as usize];
                 let bytes = if big_endian { (next as u16).to_be_bytes() } else { (next as u16).to_le_bytes() };
                 data[at..at + 2].copy_from_slice(&bytes);
@@ -113,6 +134,7 @@ fn orientation_in_tiff(data: &[u8], tiff: usize, end: usize) -> Option<(usize, b
 mod tests {
     use super::*;
     use crate::testutil::{exif_jpeg, plain_jpeg, scratch, write};
+    use std::path::PathBuf;
 
     fn red_at(path: &Path, x: u32, y: u32) -> u8 {
         image::open(path).unwrap().to_rgb8().get_pixel(x, y)[0]
@@ -165,6 +187,25 @@ mod tests {
             rotate(&path, false).unwrap();
             assert_eq!(exif_orientation_slot(&std::fs::read(&path).unwrap()).unwrap().2, 8);
         }
+    }
+
+    /// Measurement, not a test: `LANTERN_TEST_JPEG=/some/photo.jpg cargo
+    /// test rotate_timing -- --ignored --nocapture` times ten quarter turns
+    /// of a copy of that file (the copy sits beside it, so a file on a
+    /// network share measures the share).
+    #[test]
+    #[ignore = "measurement harness; needs LANTERN_TEST_JPEG"]
+    fn rotate_timing() {
+        let Some(source) = std::env::var_os("LANTERN_TEST_JPEG") else { return };
+        let source = PathBuf::from(source);
+        let copy = source.with_extension("lantern-timing.jpg");
+        std::fs::copy(&source, &copy).unwrap();
+        let started = std::time::Instant::now();
+        for i in 0..10 {
+            rotate(&copy, i % 2 == 0).unwrap();
+        }
+        eprintln!("rotate: {} ms per turn, {} bytes", started.elapsed().as_millis() / 10, std::fs::metadata(&copy).unwrap().len());
+        std::fs::remove_file(&copy).unwrap();
     }
 
     #[test]
