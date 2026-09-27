@@ -22,6 +22,10 @@ manager that happens to be good at photos, not a photo organizer.
    - **Delete** — move to the system trash (undoable), never a hard delete.
    - **Download** — copy to `~/Downloads`.
    - **Move / rename** — pick a destination folder and/or a new name.
+   - **Rotate** (viewer) — a quarter turn left or right, saved to the file
+     without losing quality: JPEG by rewriting the EXIF orientation tag
+     (or a lossless libjpeg-turbo transform when there is none), PNG by
+     re-encoding. Modified time is preserved. Other formats are refused.
 
 Out of scope: tagging, albums, face detection, editing, metadata editing,
 cloud anything, a library database.
