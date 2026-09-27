@@ -47,6 +47,11 @@ pub struct PhotoGrid {
     reverse: Rc<Cell<bool>>,
     /// Called once a folder's listing is in, with whether it had anything.
     on_loaded: Rc<RefCell<Option<Box<dyn Fn(bool)>>>>,
+    /// The right-click menu and the entry it was opened on.
+    menu: gtk::PopoverMenu,
+    photo_menu: gio::MenuModel,
+    folder_menu: gio::MenuModel,
+    context_position: Rc<Cell<u32>>,
 }
 
 impl PhotoGrid {
@@ -70,6 +75,22 @@ impl PhotoGrid {
         let container = gtk::Box::new(gtk::Orientation::Vertical, 0);
         container.append(&scrolled);
 
+        // Right-click menu. File actions live on the window (win.*); Open
+        // is the grid's own, so it can act on the entry under the pointer.
+        let photo_menu = gio::Menu::new();
+        let open = gio::Menu::new();
+        open.append(Some("Open"), Some("grid.open"));
+        photo_menu.append_section(None, &open);
+        let files = gio::Menu::new();
+        files.append(Some("Copy to Downloads"), Some("win.download"));
+        files.append(Some("Move or Rename…"), Some("win.move"));
+        files.append(Some("Move to Trash"), Some("win.delete"));
+        photo_menu.append_section(None, &files);
+        let folder_menu = gio::Menu::new();
+        folder_menu.append(Some("Open"), Some("grid.open"));
+        let menu = gtk::PopoverMenu::builder().has_arrow(false).halign(gtk::Align::Start).build();
+        menu.set_parent(&view);
+
         let grid = Self {
             container,
             scrolled,
@@ -85,8 +106,23 @@ impl PhotoGrid {
             sort_by: Rc::new(Cell::new(SortBy::Date)),
             reverse: Rc::new(Cell::new(false)),
             on_loaded: Rc::default(),
+            menu,
+            photo_menu: photo_menu.upcast(),
+            folder_menu: folder_menu.upcast(),
+            context_position: Rc::default(),
         };
         grid.view.set_factory(Some(&grid.make_factory()));
+
+        let actions = gio::SimpleActionGroup::new();
+        let open = gio::SimpleAction::new("open", None);
+        {
+            let grid = grid.clone();
+            open.connect_activate(move |_, _| {
+                grid.view.emit_by_name::<()>("activate", &[&grid.context_position.get()]);
+            });
+        }
+        actions.add_action(&open);
+        grid.view.insert_action_group("grid", Some(&actions));
 
         // The viewport width arrives through the horizontal adjustment.
         let weak = grid.clone();
@@ -167,6 +203,21 @@ impl PhotoGrid {
 
     pub fn widget(&self) -> &gtk::Box {
         &self.container
+    }
+
+    /// Open the right-click menu for the entry at `position`, at a point
+    /// given in the grid view's coordinates. A right-click on something
+    /// outside the selection selects just that.
+    fn show_context_menu(&self, position: u32, x: f64, y: f64) {
+        let Some(entry) = self.entry_at(position) else { return };
+        if !self.selection.is_selected(position) {
+            self.selection.select_item(position, true);
+        }
+        self.context_position.set(position);
+        let model = if entry.photo().is_some() { &self.photo_menu } else { &self.folder_menu };
+        self.menu.set_menu_model(Some(model));
+        self.menu.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        self.menu.popup();
     }
 
     /// The entries in their current order.
@@ -401,6 +452,7 @@ impl PhotoGrid {
 
         {
             let cells = cells.clone();
+            let grid = self.clone();
             factory.connect_setup(move |_, item| {
                 let item = item.downcast_ref::<gtk::ListItem>().unwrap();
                 let picture = gtk::Picture::builder()
@@ -422,6 +474,18 @@ impl PhotoGrid {
                 overlay.add_overlay(&label);
                 item.set_child(Some(&overlay));
                 cells.borrow_mut().insert(item.clone(), CellState::new(picture, label));
+
+                let right_click = gtk::GestureClick::builder().button(gtk::gdk::BUTTON_SECONDARY).build();
+                let grid = grid.clone();
+                let item = item.clone();
+                right_click.connect_pressed(move |gesture, _, x, y| {
+                    let Some(cell) = gesture.widget() else { return };
+                    let point = cell.compute_point(&grid.view, &gtk::graphene::Point::new(x as f32, y as f32));
+                    let Some(point) = point else { return };
+                    gesture.set_state(gtk::EventSequenceState::Claimed);
+                    grid.show_context_menu(item.position(), point.x() as f64, point.y() as f64);
+                });
+                overlay.add_controller(right_click);
             });
         }
 
