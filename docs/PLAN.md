@@ -73,7 +73,7 @@ data/
 7. Polish: keyboard shortcuts, empty states, desktop file, icon, README
    screenshots, Flatpak.
 
-## Build dependencies (Ubuntu / Pop!_OS)
+## Build dependencies (Debian and derivatives)
 
 ```
 sudo apt install libgtk-4-dev libadwaita-1-dev libheif-dev cmake nasm
