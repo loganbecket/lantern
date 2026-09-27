@@ -32,6 +32,8 @@ pub struct Viewer {
     /// current one selected and kept centered.
     strip: gtk::ScrolledWindow,
     strip_selection: gtk::SingleSelection,
+    previous: gtk::Button,
+    next: gtk::Button,
     /// Set while the viewer moves the strip's selection itself, so that
     /// doesn't bounce back as a user click.
     syncing: Cell<bool>,
@@ -66,9 +68,27 @@ impl Viewer {
             .height_request(STRIP_SIZE + 2 * STRIP_PADDING)
             .build();
 
+        // Previous / next arrows floating over the photo, like any carousel.
+        let arrow = |icon: &str, align: gtk::Align| {
+            gtk::Button::builder()
+                .icon_name(icon)
+                .css_classes(["osd", "circular", "large-icons"])
+                .halign(align)
+                .valign(gtk::Align::Center)
+                .margin_start(12)
+                .margin_end(12)
+                .can_focus(false)
+                .build()
+        };
+        let previous = arrow("go-previous-symbolic", gtk::Align::Start);
+        let next = arrow("go-next-symbolic", gtk::Align::End);
+        let overlay = gtk::Overlay::builder().child(&picture).build();
+        overlay.add_overlay(&previous);
+        overlay.add_overlay(&next);
+
         let view = adw::ToolbarView::new();
         view.add_top_bar(&header);
-        view.set_content(Some(&picture));
+        view.set_content(Some(&overlay));
         view.add_bottom_bar(&strip);
 
         let page = adw::NavigationPage::builder().child(&view).tag("viewer").title("Photo").build();
@@ -87,9 +107,20 @@ impl Viewer {
             index: Cell::new(0),
             strip,
             strip_selection,
+            previous,
+            next,
             syncing: Cell::new(false),
         });
         strip_view.set_factory(Some(&viewer.strip_factory()));
+
+        for (button, delta) in [(&viewer.previous, -1), (&viewer.next, 1)] {
+            let weak = Rc::downgrade(&viewer);
+            button.connect_clicked(move |_| {
+                if let Some(viewer) = weak.upgrade() {
+                    viewer.step(delta);
+                }
+            });
+        }
 
         // A click (or arrow key) in the strip shows that photo.
         let weak = Rc::downgrade(&viewer);
@@ -307,6 +338,8 @@ impl Viewer {
             self.cell.picture.grab_focus();
         }
         self.sync_strip(index);
+        self.previous.set_sensitive(index > 0 && self.nearest_photo(index - 1, -1).is_some());
+        self.next.set_sensitive(self.nearest_photo(index + 1, 1).is_some());
 
         let size = self.target_size();
 
