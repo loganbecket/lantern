@@ -19,7 +19,7 @@ lru = "0.18"
 libc = "0.2"
 libheif-rs = { version = "3", default-features = false, features = ["v1_17"] }
 
-# `cargo deb` builds an installable package for Ubuntu / Pop!_OS.
+# `cargo deb` builds an installable package for Debian-based distributions.
 [package.metadata.deb]
 maintainer = "Logan Becket"
 copyright = "2026, Logan Becket"

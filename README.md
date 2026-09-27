@@ -37,7 +37,9 @@ manager that is very good at photos.
 
 ## Install
 
-Ubuntu 24.04 / Pop!_OS 24.04: download the `.deb` from the
+On any Debian-based distribution with GTK 4.12 and libadwaita 1.4 or newer
+(Ubuntu 24.04+, Debian 13+, and derivatives such as Pop!_OS, Linux Mint 22+
+and elementary OS 8), download the `.deb` from the
 [latest release](https://github.com/loganbecket/lantern/releases/latest),
 then:
 
@@ -46,7 +48,8 @@ sudo apt install ./lantern_*.deb
 ```
 
 Lantern shows up in your application menu. Run `lantern ~/Pictures` to open
-a folder directly.
+a folder directly. Other distributions: build from source below; the only
+requirements are GTK 4, libadwaita and libheif.
 
 ## Keys
 
@@ -74,12 +77,16 @@ preserved so your sort order doesn't change.
 
 ## Build from source
 
-Rust 1.85 or newer, GTK 4.14 and libadwaita 1.5 (Ubuntu 24.04 and later).
+Rust 1.85 or newer, GTK 4.14, libadwaita 1.5, libheif 1.17, plus cmake and
+nasm (libjpeg-turbo is built from source). On Debian and derivatives:
 
 ```
 sudo apt install libgtk-4-dev libadwaita-1-dev libheif-dev cmake nasm
 make install
 ```
+
+On Fedora: `sudo dnf install gtk4-devel libadwaita-devel libheif-devel cmake nasm`.
+On Arch: `sudo pacman -S gtk4 libadwaita libheif cmake nasm`.
 
 `make install` builds a release binary and installs it for the current user
 only (no root), with the desktop entry and icon; `make uninstall` removes it.
