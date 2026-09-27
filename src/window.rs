@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use adw::prelude::*;
-use gtk::{gio, glib};
+use gtk::{gdk, gio, glib};
 
 use crate::actions;
 use crate::grid::{PhotoGrid, SortBy};
@@ -62,14 +62,28 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
         .title("Nothing Here")
         .description("This folder has no photos or subfolders")
         .build();
+    let failed = adw::StatusPage::builder().icon_name("dialog-error-symbolic").title("Can't Open Folder").build();
 
     let stack = gtk::Stack::new();
     stack.add_named(grid.widget(), Some("grid"));
     stack.add_named(&nothing, Some("nothing"));
+    stack.add_named(&failed, Some("failed"));
     {
         let stack = stack.clone();
-        grid.connect_loaded(move |has_entries| {
-            stack.set_visible_child_name(if has_entries { "grid" } else { "nothing" });
+        let grid = grid.clone();
+        grid.clone().connect_loaded(move |outcome| match outcome {
+            Ok(true) => {
+                stack.set_visible_child_name("grid");
+                remember_folder(&grid);
+            }
+            Ok(false) => {
+                stack.set_visible_child_name("nothing");
+                remember_folder(&grid);
+            }
+            Err(err) => {
+                failed.set_description(Some(&err));
+                stack.set_visible_child_name("failed");
+            }
         });
     }
 
@@ -127,7 +141,6 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
             title.set_subtitle(&dir.path().unwrap_or_default().display().to_string());
             stack.set_visible_child_name("grid");
             up_action.set_enabled(dir.parent().is_some());
-            remember_folder(&dir);
             grid.load(dir);
         }
     };
@@ -185,8 +198,10 @@ pub fn build(app: &adw::Application, folder: Option<gio::File>) -> adw::Applicat
     window
 }
 
-fn remember_folder(dir: &gio::File) {
-    if let Some(path) = dir.path() {
+/// Remember the grid's folder as the one to reopen next time. Called only
+/// once a folder has listed, so an unreadable one is never remembered.
+fn remember_folder(grid: &PhotoGrid) {
+    if let Some(path) = grid.dir().and_then(|d| d.path()) {
         settings::set(settings::LAST_FOLDER, &path.to_string_lossy());
     }
 }
@@ -222,7 +237,7 @@ fn add_zoom(window: &adw::ApplicationWindow, grid_page: &impl IsA<gtk::Widget>, 
     scroll.set_propagation_phase(gtk::PropagationPhase::Capture);
     let size = size.clone();
     scroll.connect_scroll(move |controller, _, dy| {
-        if !controller.current_event_state().contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+        if !controller.current_event_state().contains(gdk::ModifierType::CONTROL_MASK) {
             return glib::Propagation::Proceed;
         }
         size.set_value(size.value() - dy * STEP);
@@ -330,14 +345,7 @@ fn add_file_actions(
     }
     {
         let refresh = refresh.clone();
-        let grid = grid.clone();
-        let viewer = viewer.clone();
-        nav.connect_visible_page_notify(move |_| {
-            refresh();
-            if viewer.take_dirty() {
-                grid.refresh_cells();
-            }
-        });
+        nav.connect_visible_page_notify(move |_| refresh());
     }
     {
         let toasts = toasts.clone();
@@ -346,7 +354,6 @@ fn add_file_actions(
 
     // After files change under us: fix up the viewer, then report.
     let finish = {
-        let grid = grid.clone();
         let viewer = viewer.clone();
         let nav = nav.clone();
         let toasts = toasts.clone();
@@ -357,7 +364,6 @@ fn add_file_actions(
                 nav.pop();
             }
             refresh();
-            let _ = &grid;
             toasts.add_toast(adw::Toast::new(&message));
         }
     };
@@ -374,7 +380,7 @@ fn add_file_actions(
                 let outcome = actions::trash(files).await;
                 let done: Vec<gio::File> = outcome.iter().filter(|(_, r)| r.is_ok()).map(|(f, _)| f.clone()).collect();
                 grid.remove_files(&done);
-                finish(summarize(&outcome, "Moved", "to Trash"));
+                finish(summarize(&outcome, "Moved", "to Trash", "trash"));
             });
         });
     }
@@ -387,7 +393,7 @@ fn add_file_actions(
             let finish = finish.clone();
             glib::spawn_future_local(async move {
                 let outcome = actions::download(files).await;
-                finish(summarize(&outcome, "Copied", "to Downloads"));
+                finish(summarize(&outcome, "Copied", "to Downloads", "copy"));
             });
         });
     }
@@ -420,7 +426,7 @@ fn add_file_actions(
                             Ok(_) => grid.remove_files(&[source.clone()]),
                             Err(_) => {}
                         }
-                        finish(summarize(&[(source, result)], "Moved", ""));
+                        finish(summarize(&[(source, result)], "Moved", "", "move"));
                     });
                 });
             } else {
@@ -434,7 +440,7 @@ fn add_file_actions(
                             let done: Vec<gio::File> = outcome.iter().filter(|(_, r)| r.is_ok()).map(|(f, _)| f.clone()).collect();
                             grid.remove_files(&done);
                         }
-                        finish(summarize(&outcome, "Moved", ""));
+                        finish(summarize(&outcome, "Moved", "", "move"));
                     });
                 });
             }
@@ -450,11 +456,11 @@ fn add_file_actions(
     app.set_accels_for_action("win.move", &["F2"]);
 }
 
-/// "Moved 3 photos to Trash", or the first error if anything failed.
-fn summarize(outcome: &[(gio::File, Result<gio::File, String>)], verb: &str, suffix: &str) -> String {
+/// "Moved 3 photos to Trash", or "Couldn't trash x: ..." if anything failed.
+fn summarize(outcome: &[(gio::File, Result<gio::File, String>)], verb: &str, suffix: &str, failed: &str) -> String {
     if let Some((file, Err(err))) = outcome.iter().find(|(_, r)| r.is_err()) {
         let name = file.basename().unwrap_or_default().to_string_lossy().into_owned();
-        return format!("Couldn't move {name}: {err}");
+        return format!("Couldn't {failed} {name}: {err}");
     }
     let count = outcome.len();
     let what = match (count, outcome.first()) {

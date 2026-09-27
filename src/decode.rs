@@ -158,7 +158,9 @@ fn jpeg_exif_thumbnail(data: &[u8]) -> Option<RgbaImage> {
         .get_field(exif::Tag::Orientation, exif::In::PRIMARY)
         .and_then(|f| f.value.get_uint(0))
         .unwrap_or(1);
-    Some(orient(decode_jpeg(thumb, 1).ok()?, orientation))
+    // Full size: the thumbnail is tiny already, and a target of 1 would
+    // make decode_jpeg pick 1/8 scale and hand back a 20 px smudge.
+    Some(orient(decode_jpeg(thumb, u32::MAX).ok()?, orientation))
 }
 
 /// HEIF files start with an `ftyp` box naming a HEIF/AVIF brand.
@@ -209,10 +211,57 @@ fn decode_heif(data: &[u8], target: u32) -> Result<RgbaImage, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{exif_jpeg, plain_jpeg, scratch, write};
 
-    /// `LANTERN_TEST_DIR=/some/photos cargo test previews -- --nocapture`
-    /// reports how many files in a folder yield a preview and how big it is.
     #[test]
+    fn preview_is_the_embedded_thumbnail_at_full_size() {
+        let thumb = plain_jpeg(160, 120);
+        for big_endian in [false, true] {
+            let path = scratch(&format!("preview-{big_endian}.jpg"));
+            write(&path, &exif_jpeg(1600, 1200, 1, big_endian, Some(&thumb)));
+            let preview = preview(&path).expect("embedded thumbnail");
+            assert_eq!((preview.width, preview.height), (160, 120));
+        }
+    }
+
+    #[test]
+    fn preview_follows_the_orientation_tag() {
+        let path = scratch("preview-rotated.jpg");
+        write(&path, &exif_jpeg(1600, 1200, 6, true, Some(&plain_jpeg(160, 120))));
+        let preview = preview(&path).unwrap();
+        assert_eq!((preview.width, preview.height), (120, 160));
+    }
+
+    #[test]
+    fn no_thumbnail_means_no_preview() {
+        let path = scratch("preview-none.jpg");
+        write(&path, &exif_jpeg(640, 480, 1, true, None));
+        assert!(preview(&path).is_none());
+    }
+
+    #[test]
+    fn thumbnails_are_oriented_and_no_smaller_than_asked() {
+        let path = scratch("decode-rotated.jpg");
+        write(&path, &exif_jpeg(1600, 800, 6, true, None));
+        let decoded = decode(&path, 256, &AtomicBool::new(false)).unwrap();
+        // 1/8 scale (200x100) would be too small for 256, so 1/4 (400x200)
+        // is decoded, shrunk to fit 256, then turned upright.
+        assert_eq!((decoded.width, decoded.height), (128, 256));
+    }
+
+    #[test]
+    fn canceled_reads_stop_early() {
+        let path = scratch("decode-canceled.jpg");
+        write(&path, &plain_jpeg(64, 64));
+        let canceled = AtomicBool::new(true);
+        assert_eq!(decode(&path, 256, &canceled).err().as_deref(), Some("canceled"));
+    }
+
+    /// Measurement, not a test: `LANTERN_TEST_DIR=/some/photos cargo test
+    /// previews -- --ignored --nocapture` reports how many files in a
+    /// folder yield a preview, how big, and how long it took.
+    #[test]
+    #[ignore = "measurement harness; needs LANTERN_TEST_DIR"]
     fn previews() {
         let Some(dir) = std::env::var_os("LANTERN_TEST_DIR") else { return };
         let mut ok = 0;
@@ -234,7 +283,6 @@ mod tests {
                 }
                 None => eprintln!("no preview: {}", path.display()),
             }
-            // How much of the prefix was really needed?
             if let Some(prefix) = read_prefix(&path, PREVIEW_BYTES) {
                 for (kb, hits) in [(64, &mut hits_64), (128, &mut hits_128)] {
                     if jpeg_exif_thumbnail(&prefix[..prefix.len().min(kb * 1024)]).is_some() {

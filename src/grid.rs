@@ -1,12 +1,13 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
-use gtk::{gio, glib};
+use gtk::{gdk, gio, glib, graphene, pango};
 
 use crate::photo::{self, Entry, PhotoInfo};
-use crate::thumbs::{CellState, Thumbnails};
+use crate::thumbs::{self, CellState, Thumbnails};
 
 /// File extensions Lantern treats as photos, lowercase.
 const PHOTO_EXTENSIONS: &[&str] = &[
@@ -45,8 +46,9 @@ pub struct PhotoGrid {
     generation: Rc<Cell<u32>>,
     sort_by: Rc<Cell<SortBy>>,
     reverse: Rc<Cell<bool>>,
-    /// Called once a folder's listing is in, with whether it had anything.
-    on_loaded: Rc<RefCell<Option<Box<dyn Fn(bool)>>>>,
+    /// Called once a folder's listing is in (with whether it had anything)
+    /// or has failed (with the reason).
+    on_loaded: Rc<RefCell<Option<Box<dyn Fn(Result<bool, String>)>>>>,
     /// The right-click menus (one per kind of entry: swapping models on a
     /// single popover leaves it sized for the previous one, which shows
     /// as a scrolling menu) and the entry one was opened on.
@@ -164,7 +166,7 @@ impl PhotoGrid {
         let grid = self.clone();
         let touched = generation.clone();
         scroll.connect_scroll(move |controller, _, dy| {
-            if controller.current_event_state().contains(gtk::gdk::ModifierType::CONTROL_MASK) {
+            if controller.current_event_state().contains(gdk::ModifierType::CONTROL_MASK) {
                 return glib::Propagation::Proceed;
             }
             touched.set(touched.get().wrapping_add(1));
@@ -172,7 +174,7 @@ impl PhotoGrid {
             if std::env::var_os("LANTERN_DEBUG").is_some() {
                 eprintln!("scroll unit={:?} dy={dy:.2} page={:.0} value={:.0}", controller.unit(), adjustment.page_size(), adjustment.value());
             }
-            let delta = if controller.unit() == gtk::gdk::ScrollUnit::Wheel {
+            let delta = if controller.unit() == gdk::ScrollUnit::Wheel {
                 let row = (grid.cell_size.get() + 2 * CELL_PADDING) as f64;
                 dy * (2.0 * row).max(adjustment.page_size() / 2.0)
             } else {
@@ -220,7 +222,7 @@ impl PhotoGrid {
         }
         self.context_position.set(position);
         let menu = if entry.photo().is_some() { &self.photo_menu } else { &self.folder_menu };
-        menu.set_pointing_to(Some(&gtk::gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
+        menu.set_pointing_to(Some(&gdk::Rectangle::new(x as i32, y as i32, 1, 1)));
         menu.popup();
     }
 
@@ -242,7 +244,7 @@ impl PhotoGrid {
         self.selection.connect_selection_changed(move |_, _, _| f());
     }
 
-    pub fn connect_loaded(&self, f: impl Fn(bool) + 'static) {
+    pub fn connect_loaded(&self, f: impl Fn(Result<bool, String>) + 'static) {
         *self.on_loaded.borrow_mut() = Some(Box::new(f));
     }
 
@@ -276,17 +278,33 @@ impl PhotoGrid {
     /// photo was. Without that, GTK would move focus to the first cell and
     /// scroll the grid back to the top.
     pub fn remove_files(&self, files: &[gio::File]) {
-        let gone = |f: &gio::File| files.iter().any(|g| g.equal(f));
-        self.photos.borrow_mut().retain(|p| !gone(&p.file));
-        let mut first_removed = None;
-        for index in (0..self.store.n_items()).rev() {
-            if self.entry_at(index).is_some_and(|e| e.photo().is_some() && gone(e.file())) {
-                self.store.remove(index);
-                first_removed = Some(index);
+        let gone: HashSet<String> = files.iter().map(|f| f.uri().to_string()).collect();
+        self.photos.borrow_mut().retain(|p| !gone.contains(p.file.uri().as_str()));
+        for file in files {
+            if let Some(path) = file.path() {
+                self.thumbs.forget(&path);
             }
         }
+
+        let mut kept = Vec::new();
+        let mut first_removed = None;
+        for index in 0..self.store.n_items() {
+            let Some(object) = self.store.item(index).and_downcast::<glib::BoxedAnyObject>() else { continue };
+            let removed = {
+                let entry = object.borrow::<Entry>();
+                entry.photo().is_some() && gone.contains(entry.file().uri().as_str())
+            };
+            if removed {
+                first_removed.get_or_insert(index);
+            } else {
+                kept.push(object);
+            }
+        }
+        let Some(index) = first_removed else { return };
+        self.store.splice(0, self.store.n_items(), &kept);
+
         let count = self.store.n_items();
-        if let (Some(index), true) = (first_removed, count > 0) {
+        if count > 0 {
             let flags = gtk::ListScrollFlags::FOCUS | gtk::ListScrollFlags::SELECT;
             self.view.scroll_to(index.min(count - 1), flags, None);
         }
@@ -295,6 +313,9 @@ impl PhotoGrid {
     /// A photo was renamed in place; keep its spot, update its identity.
     pub fn replace_file(&self, old: &gio::File, new: gio::File) {
         let name = new.basename().unwrap_or_default().to_string_lossy().into_owned();
+        if let Some(path) = old.path() {
+            self.thumbs.forget(&path);
+        }
         let mut photos = self.photos.borrow_mut();
         let Some(photo) = photos.iter_mut().find(|p| p.file.equal(old)) else { return };
         photo.file = new;
@@ -307,11 +328,6 @@ impl PhotoGrid {
                 break;
             }
         }
-    }
-
-    /// Rebuild the visible tiles, e.g. after a photo changed on disk.
-    pub fn refresh_cells(&self) {
-        self.view.set_factory(Some(&self.make_factory()));
     }
 
     pub fn set_cell_size(&self, size: i32) {
@@ -367,22 +383,25 @@ impl PhotoGrid {
 
         let grid = self.clone();
         glib::spawn_future_local(async move {
-            let (folders, photos) = match list_entries(&dir).await {
-                Ok(listing) => listing,
-                Err(err) => {
-                    eprintln!("lantern: cannot read {}: {err}", dir.uri());
-                    return;
-                }
-            };
+            let listing = list_entries(&dir).await;
             if grid.generation.get() != generation {
                 return;
             }
+            let (folders, photos) = match listing {
+                Ok(listing) => listing,
+                Err(err) => {
+                    if let Some(on_loaded) = &*grid.on_loaded.borrow() {
+                        on_loaded(Err(err.to_string()));
+                    }
+                    return;
+                }
+            };
             let has_entries = !folders.is_empty() || !photos.is_empty();
             *grid.folders.borrow_mut() = folders;
             *grid.photos.borrow_mut() = photos.clone();
             grid.apply_sort();
             if let Some(on_loaded) = &*grid.on_loaded.borrow() {
-                on_loaded(has_entries);
+                on_loaded(Ok(has_entries));
             }
 
             let started = std::time::Instant::now();
@@ -391,12 +410,14 @@ impl PhotoGrid {
                 return;
             }
             if std::env::var_os("LANTERN_DEBUG").is_some() {
-                let found = taken.iter().filter(|t| t.is_some()).count();
-                eprintln!("dates: {found} of {} in {} ms", taken.len(), started.elapsed().as_millis());
+                eprintln!("dates: {} of {} in {} ms", taken.len(), photos.len(), started.elapsed().as_millis());
             }
+            // By path, not position: photos may have been removed meanwhile.
             let mut current = grid.photos.borrow_mut();
-            for (photo, taken) in current.iter_mut().zip(taken) {
-                photo.taken = taken;
+            for photo in current.iter_mut() {
+                if let Some(when) = photo.file.path().and_then(|p| taken.get(&p)) {
+                    photo.taken = Some(*when);
+                }
             }
             drop(current);
             if grid.sort_by.get() == SortBy::Date {
@@ -453,105 +474,44 @@ impl PhotoGrid {
     }
 
     fn make_factory(&self) -> gtk::SignalListItemFactory {
-        let factory = gtk::SignalListItemFactory::new();
         let size = self.cell_size.get();
-        let thumbs = self.thumbs.clone();
-        let cells: Rc<RefCell<HashMap<gtk::ListItem, Rc<CellState>>>> = Rc::default();
-        let folder_icon = folder_icon(&self.view, size);
+        let icon = thumbs::folder_icon(&self.view, size);
+        let grid = self.clone();
+        thumbs::cell_factory(&self.thumbs, size, icon, move |item| {
+            let picture = gtk::Picture::builder()
+                .content_fit(gtk::ContentFit::Contain)
+                .can_shrink(true)
+                .width_request(size)
+                .height_request(size)
+                .css_classes(["skeleton"])
+                .build();
+            let label = gtk::Label::builder()
+                .css_classes(["folder-name"])
+                .ellipsize(pango::EllipsizeMode::Middle)
+                .max_width_chars(1)
+                .hexpand(true)
+                .valign(gtk::Align::End)
+                .visible(false)
+                .build();
+            let overlay = gtk::Overlay::builder().child(&picture).build();
+            overlay.add_overlay(&label);
+            item.set_child(Some(&overlay));
 
-        {
-            let cells = cells.clone();
-            let grid = self.clone();
-            factory.connect_setup(move |_, item| {
-                let item = item.downcast_ref::<gtk::ListItem>().unwrap();
-                let picture = gtk::Picture::builder()
-                    .content_fit(gtk::ContentFit::Contain)
-                    .can_shrink(true)
-                    .width_request(size)
-                    .height_request(size)
-                    .css_classes(["skeleton"])
-                    .build();
-                let label = gtk::Label::builder()
-                    .css_classes(["folder-name"])
-                    .ellipsize(gtk::pango::EllipsizeMode::Middle)
-                    .max_width_chars(1)
-                    .hexpand(true)
-                    .valign(gtk::Align::End)
-                    .visible(false)
-                    .build();
-                let overlay = gtk::Overlay::builder().child(&picture).build();
-                overlay.add_overlay(&label);
-                item.set_child(Some(&overlay));
-                cells.borrow_mut().insert(item.clone(), CellState::new(picture, label));
-
-                let right_click = gtk::GestureClick::builder().button(gtk::gdk::BUTTON_SECONDARY).build();
-                let grid = grid.clone();
-                let item = item.clone();
-                right_click.connect_pressed(move |gesture, _, x, y| {
-                    let Some(cell) = gesture.widget() else { return };
-                    let point = cell.compute_point(&grid.view, &gtk::graphene::Point::new(x as f32, y as f32));
-                    let Some(point) = point else { return };
-                    gesture.set_state(gtk::EventSequenceState::Claimed);
-                    grid.show_context_menu(item.position(), point.x() as f64, point.y() as f64);
-                });
-                overlay.add_controller(right_click);
+            let right_click = gtk::GestureClick::builder().button(gdk::BUTTON_SECONDARY).build();
+            let grid = grid.clone();
+            let item = item.clone();
+            right_click.connect_pressed(move |gesture, _, x, y| {
+                let Some(cell) = gesture.widget() else { return };
+                let point = cell.compute_point(&grid.view, &graphene::Point::new(x as f32, y as f32));
+                let Some(point) = point else { return };
+                gesture.set_state(gtk::EventSequenceState::Claimed);
+                grid.show_context_menu(item.position(), point.x() as f64, point.y() as f64);
             });
-        }
+            overlay.add_controller(right_click);
 
-        {
-            let cells = cells.clone();
-            let thumbs = thumbs.clone();
-            factory.connect_bind(move |_, item| {
-                let item = item.downcast_ref::<gtk::ListItem>().unwrap();
-                let object = item.item().and_downcast::<glib::BoxedAnyObject>().unwrap();
-                let entry = object.borrow::<Entry>();
-                let Some(cell) = cells.borrow().get(item).cloned() else { return };
-                cell.picture.set_tooltip_text(Some(entry.name()));
-                match &*entry {
-                    Entry::Folder { name, .. } => {
-                        thumbs.release(&cell);
-                        cell.show_folder(&folder_icon, name);
-                    }
-                    Entry::Photo(photo) => {
-                        cell.label.set_visible(false);
-                        let Some(path) = photo.file.path() else { return };
-                        let pixels = size as u32 * cell.picture.scale_factor().max(1) as u32;
-                        thumbs.request(&cell, path, pixels, item.position(), true);
-                    }
-                }
-            });
-        }
-
-        {
-            let cells = cells.clone();
-            let thumbs = thumbs.clone();
-            factory.connect_unbind(move |_, item| {
-                let item = item.downcast_ref::<gtk::ListItem>().unwrap();
-                if let Some(cell) = cells.borrow().get(item) {
-                    thumbs.release(cell);
-                }
-            });
-        }
-
-        factory.connect_teardown(move |_, item| {
-            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
-            cells.borrow_mut().remove(item);
-        });
-
-        factory
+            CellState::new(picture, Some(label))
+        })
     }
-}
-
-/// The theme's folder icon, sized to sit comfortably inside a cell.
-fn folder_icon(widget: &impl IsA<gtk::Widget>, cell_size: i32) -> gtk::IconPaintable {
-    gtk::IconTheme::for_display(&WidgetExt::display(widget)).lookup_icon(
-        "folder",
-        &[],
-        cell_size / 2,
-        widget.scale_factor(),
-        gtk::TextDirection::None,
-        gtk::IconLookupFlags::empty(),
-    )
 }
 
 /// List the subfolders and photo files directly inside `dir`, skipping
@@ -609,40 +569,45 @@ async fn list_entries(dir: &gio::File) -> Result<(Vec<Entry>, Vec<PhotoInfo>), g
 const SLOW_READ_MS: u128 = 20;
 const PROBE_FILES: usize = 12;
 
-/// Read every photo's date taken on a few threads, off the main loop.
+/// Read every photo's date taken on a few threads, off the main loop,
+/// keyed by path so the result can be applied to whatever is still in the
+/// folder when it lands.
 ///
-/// Returns all `None` when the folder is too slow to be worth it (see
+/// Returns nothing when the folder is too slow to be worth it (see
 /// `SLOW_READ_MS`); modified times then stand in for dates taken.
-async fn read_taken_dates(photos: &[PhotoInfo]) -> Vec<Option<i64>> {
-    let paths: Vec<Option<std::path::PathBuf>> = photos.iter().map(|p| p.file.path()).collect();
+async fn read_taken_dates(photos: &[PhotoInfo]) -> HashMap<PathBuf, i64> {
+    let paths: Vec<PathBuf> = photos.iter().filter_map(|p| p.file.path()).collect();
     let (tx, rx) = async_channel::bounded(1);
     std::thread::spawn(move || {
-        let mut taken = vec![None; paths.len()];
-
         let probe = paths.len().min(PROBE_FILES);
         let started = std::time::Instant::now();
-        for (slot, path) in taken.iter_mut().zip(&paths).take(probe) {
-            *slot = path.as_deref().and_then(photo::read_taken);
-        }
+        let mut taken: HashMap<PathBuf, i64> = paths[..probe]
+            .iter()
+            .filter_map(|p| photo::read_taken(p).map(|t| (p.clone(), t)))
+            .collect();
         if probe > 0 && started.elapsed().as_millis() / probe as u128 > SLOW_READ_MS {
             if std::env::var_os("LANTERN_DEBUG").is_some() {
                 eprintln!("dates: folder is slow to read, keeping modified times");
             }
-            let _ = tx.send_blocking(vec![None; paths.len()]);
+            let _ = tx.send_blocking(HashMap::new());
             return;
         }
 
         let rest = &paths[probe..];
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(8);
         let chunk = rest.len().div_ceil(threads).max(1);
-        let read: Vec<Option<i64>> = std::thread::scope(|scope| {
+        let read: Vec<(PathBuf, i64)> = std::thread::scope(|scope| {
             let workers: Vec<_> = rest
                 .chunks(chunk)
-                .map(|chunk| scope.spawn(move || chunk.iter().map(|p| p.as_deref().and_then(photo::read_taken)).collect::<Vec<_>>()))
+                .map(|chunk| {
+                    scope.spawn(move || {
+                        chunk.iter().filter_map(|p| photo::read_taken(p).map(|t| (p.clone(), t))).collect::<Vec<_>>()
+                    })
+                })
                 .collect();
             workers.into_iter().flat_map(|w| w.join().unwrap_or_default()).collect()
         });
-        taken[probe..].copy_from_slice(&read);
+        taken.extend(read);
         let _ = tx.send_blocking(taken);
     });
     rx.recv().await.unwrap_or_default()
