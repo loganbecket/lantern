@@ -5,13 +5,15 @@ mod loader;
 mod photo;
 mod rotate;
 mod settings;
+#[cfg(test)]
+mod testutil;
 mod sidebar;
 mod thumbs;
 mod viewer;
 mod window;
 
 use adw::prelude::*;
-use gtk::gio;
+use gtk::{gdk, gio};
 
 pub const APP_ID: &str = "io.github.loganbecket.Lantern";
 
@@ -39,7 +41,7 @@ fn load_css() {
     let provider = gtk::CssProvider::new();
     provider.load_from_string(include_str!("style.css"));
     gtk::style_context_add_provider_for_display(
-        &gtk::gdk::Display::default().expect("no display"),
+        &gdk::Display::default().expect("no display"),
         &provider,
         gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );

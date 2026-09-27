@@ -105,6 +105,9 @@ window in an already running Lantern.
   file through the reader API, so HEIC goes straight to the full path.
   Reads of file prefixes must be one large read: `read_to_end`-style
   growth costs ~100 ms per file over SMB.
+- 2026-09-27, review: embedded previews were being decoded at 1/8 scale
+  (a 160 px thumbnail shown as 20 px) because the preview asked
+  `decode_jpeg` for a 1 px target; now decoded at full size, with a test.
 - 2026-09-26, date taken. Reading the first 64 KB of a file finds the EXIF
   date for 39 of 40 real iPhone HEICs; 1000 local files take ~40 ms. On the
   share every file open costs ~100 ms and opens serialize, so the same pass

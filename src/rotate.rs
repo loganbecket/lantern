@@ -55,8 +55,7 @@ pub fn rotate(path: &Path, clockwise: bool) -> Result<(), String> {
 /// a crash or full disk can't leave a half-written photo.
 fn write_in_place(path: &Path, data: &[u8]) -> Result<(), String> {
     let temp = path.with_extension(format!("{}.lantern-tmp", path.extension().and_then(|e| e.to_str()).unwrap_or("")));
-    std::fs::write(&temp, data).map_err(|e| e.to_string())?;
-    std::fs::rename(&temp, path).map_err(|e| {
+    std::fs::write(&temp, data).and_then(|_| std::fs::rename(&temp, path)).map_err(|e| {
         let _ = std::fs::remove_file(&temp);
         e.to_string()
     })
@@ -113,53 +112,75 @@ fn orientation_in_tiff(data: &[u8], tiff: usize, end: usize) -> Option<(usize, b
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::testutil::{exif_jpeg, plain_jpeg, scratch, write};
 
-    fn scratch(name: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("lantern-rotate-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.join(name)
+    fn red_at(path: &Path, x: u32, y: u32) -> u8 {
+        image::open(path).unwrap().to_rgb8().get_pixel(x, y)[0]
     }
 
     #[test]
     fn jpeg_without_exif_rotates_losslessly_and_keeps_mtime() {
         let path = scratch("plain.jpg");
-        let img = image::RgbImage::from_fn(64, 32, |x, _| image::Rgb([x as u8 * 4, 0, 0]));
-        img.save(&path).unwrap();
+        write(&path, &plain_jpeg(64, 32));
         let before = std::fs::metadata(&path).unwrap().modified().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(20));
 
         rotate(&path, true).unwrap();
         let rotated = image::open(&path).unwrap();
         assert_eq!((rotated.width(), rotated.height()), (32, 64));
+        // The gradient ran left to right; after a clockwise turn it runs
+        // top to bottom, so the top is dark and the bottom is bright.
+        assert!(red_at(&path, 16, 2) < 60, "top should be dark");
+        assert!(red_at(&path, 16, 61) > 180, "bottom should be bright");
         assert_eq!(std::fs::metadata(&path).unwrap().modified().unwrap(), before);
         assert!(exif_orientation_slot(&std::fs::read(&path).unwrap()).is_none());
-    }
-
-    /// `LANTERN_TEST_JPEG=/some/photo.jpg` (with an EXIF orientation tag)
-    /// checks that only the tag changes.
-    #[test]
-    fn jpeg_with_exif_changes_only_the_tag() {
-        let Some(source) = std::env::var_os("LANTERN_TEST_JPEG") else { return };
-        let path = scratch("exif.jpg");
-        std::fs::copy(source, &path).unwrap();
-        let before = std::fs::read(&path).unwrap();
-        let (at, _, value) = exif_orientation_slot(&before).expect("test file needs an orientation tag");
-
-        rotate(&path, true).unwrap();
-        let after = std::fs::read(&path).unwrap();
-        assert_eq!(before.len(), after.len());
-        let differing: Vec<usize> = (0..before.len()).filter(|&i| before[i] != after[i]).collect();
-        assert!(differing.iter().all(|i| (at..at + 2).contains(i)), "changed bytes {differing:?}");
-        assert_eq!(exif_orientation_slot(&after).unwrap().2, CLOCKWISE[value as usize]);
 
         rotate(&path, false).unwrap();
+        assert!(red_at(&path, 2, 16) < 60, "back to dark on the left");
+    }
+
+    #[test]
+    fn jpeg_with_exif_changes_only_the_tag() {
+        for big_endian in [false, true] {
+            let path = scratch(&format!("exif-{big_endian}.jpg"));
+            let before = exif_jpeg(64, 32, 1, big_endian, None);
+            write(&path, &before);
+            let (at, _, value) = exif_orientation_slot(&before).unwrap();
+            assert_eq!(value, 1);
+
+            rotate(&path, true).unwrap();
+            let after = std::fs::read(&path).unwrap();
+            assert_eq!(before.len(), after.len());
+            let differing: Vec<usize> = (0..before.len()).filter(|&i| before[i] != after[i]).collect();
+            assert!(differing.iter().all(|i| (at..at + 2).contains(i)), "changed bytes {differing:?}");
+            assert_eq!(exif_orientation_slot(&after).unwrap().2, 6, "upright turned clockwise is 6");
+
+            rotate(&path, true).unwrap();
+            assert_eq!(exif_orientation_slot(&std::fs::read(&path).unwrap()).unwrap().2, 3);
+
+            rotate(&path, false).unwrap();
+            rotate(&path, false).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), before, "two back should restore the file");
+
+            rotate(&path, false).unwrap();
+            assert_eq!(exif_orientation_slot(&std::fs::read(&path).unwrap()).unwrap().2, 8);
+        }
+    }
+
+    #[test]
+    fn other_formats_are_left_untouched() {
+        let path = scratch("photo.gif");
+        image::RgbImage::from_pixel(8, 8, image::Rgb([200, 40, 40])).save(&path).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        assert!(rotate(&path, true).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 
     #[test]
-    fn other_formats_are_refused() {
-        let path = scratch("photo.webp");
-        std::fs::write(&path, b"RIFF....WEBP").unwrap();
-        assert!(rotate(&path, true).is_err());
+    fn a_failed_write_leaves_no_temp_file() {
+        let dir = scratch("missing-dir");
+        let path = dir.join("nowhere.jpg");
+        assert!(write_in_place(&path, b"x").is_err());
+        assert!(std::fs::read_dir(scratch("")).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().contains("lantern-tmp")));
     }
 }

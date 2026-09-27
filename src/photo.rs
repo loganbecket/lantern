@@ -77,3 +77,26 @@ fn parse_exif_datetime(field: &exif::Field) -> Option<i64> {
     let (h, mi, s) = (hms.next()??, hms.next()??, hms.next()??);
     glib::DateTime::from_local(y, m, d, h, mi, s as f64).ok().map(|dt| dt.to_unix())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn field(text: &str) -> exif::Field {
+        exif::Field {
+            tag: exif::Tag::DateTimeOriginal,
+            ifd_num: exif::In::PRIMARY,
+            value: exif::Value::Ascii(vec![text.as_bytes().to_vec()]),
+        }
+    }
+
+    #[test]
+    fn exif_dates_parse_as_local_time_and_junk_is_rejected() {
+        let expected = glib::DateTime::from_local(2019, 7, 27, 14, 3, 11.0).unwrap().to_unix();
+        assert_eq!(parse_exif_datetime(&field("2019:07:27 14:03:11")), Some(expected));
+        assert_eq!(parse_exif_datetime(&field("0000:00:00 00:00:00")), None);
+        assert_eq!(parse_exif_datetime(&field("    :  :     :  :  ")), None);
+        assert_eq!(parse_exif_datetime(&field("2019:07:27")), None);
+        assert_eq!(parse_exif_datetime(&field("")), None);
+    }
+}

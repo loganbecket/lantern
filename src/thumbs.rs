@@ -14,6 +14,7 @@ use lru::LruCache;
 
 use crate::decode::Decoded;
 use crate::loader::{Job, Kind, Pool, Reply};
+use crate::photo::Entry;
 
 /// Thumbnails are decoded at one of these sizes (in pixels, longest edge) so
 /// nudging the size slider reuses what is already decoded.
@@ -27,12 +28,15 @@ const CACHE_BYTES: usize = 512 * 1024 * 1024;
 
 type Key = (PathBuf, u32);
 
-/// One grid cell's picture widget and the thumbnail it is currently showing
-/// or waiting for.
+/// One cell's picture widget and the thumbnail it is currently showing or
+/// waiting for. Used by the grid, the filmstrip and the viewer alike.
 pub struct CellState {
     pub picture: gtk::Picture,
-    /// Caption shown for folders only.
-    pub label: gtk::Label,
+    /// Caption shown for folders; only grid tiles have one.
+    pub label: Option<gtk::Label>,
+    /// How the picture fits its frame when showing a photo (folder icons
+    /// always scale down), as set by whoever built the widget.
+    fit: gtk::ContentFit,
     /// The full-size request this cell is bound to, if any.
     key: RefCell<Option<Key>>,
     /// Whether the picture holds the real thumbnail (not just a preview).
@@ -40,8 +44,9 @@ pub struct CellState {
 }
 
 impl CellState {
-    pub fn new(picture: gtk::Picture, label: gtk::Label) -> Rc<Self> {
-        Rc::new(Self { picture, label, key: RefCell::new(None), sharp: Cell::new(false) })
+    pub fn new(picture: gtk::Picture, label: Option<gtk::Label>) -> Rc<Self> {
+        let fit = picture.content_fit();
+        Rc::new(Self { picture, label, fit, key: RefCell::new(None), sharp: Cell::new(false) })
     }
 
     /// Turn the cell into a folder tile: icon plus name, no thumbnail.
@@ -50,12 +55,14 @@ impl CellState {
         self.picture.set_paintable(Some(icon));
         self.picture.remove_css_class("skeleton");
         self.picture.remove_css_class("broken");
-        self.label.set_text(name);
-        self.label.set_visible(true);
+        if let Some(label) = &self.label {
+            label.set_text(name);
+            label.set_visible(true);
+        }
     }
 
     fn show(&self, texture: &gdk::Texture, sharp: bool) {
-        self.picture.set_content_fit(gtk::ContentFit::Contain);
+        self.picture.set_content_fit(self.fit);
         self.picture.set_paintable(Some(texture));
         self.picture.remove_css_class("skeleton");
         self.picture.remove_css_class("broken");
@@ -79,6 +86,83 @@ impl CellState {
     fn path(&self) -> Option<PathBuf> {
         self.key.borrow().as_ref().map(|k| k.0.clone())
     }
+}
+
+/// The theme's folder icon, sized to sit comfortably inside a cell.
+pub fn folder_icon(widget: &impl IsA<gtk::Widget>, cell_size: i32) -> gtk::IconPaintable {
+    gtk::IconTheme::for_display(&WidgetExt::display(widget)).lookup_icon(
+        "folder",
+        &[],
+        cell_size / 2,
+        widget.scale_factor(),
+        gtk::TextDirection::None,
+        gtk::IconLookupFlags::empty(),
+    )
+}
+
+/// A list item factory for a model of `Entry` objects, wired to the loader.
+/// `setup` builds one cell's widgets and returns its state; binding,
+/// unbinding and teardown are the same for every view that shows entries.
+pub fn cell_factory(
+    thumbs: &Rc<Thumbnails>,
+    size: i32,
+    folder_icon: gtk::IconPaintable,
+    setup: impl Fn(&gtk::ListItem) -> Rc<CellState> + 'static,
+) -> gtk::SignalListItemFactory {
+    let factory = gtk::SignalListItemFactory::new();
+    let cells: Rc<RefCell<HashMap<gtk::ListItem, Rc<CellState>>>> = Rc::default();
+
+    {
+        let cells = cells.clone();
+        factory.connect_setup(move |_, item| {
+            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+            cells.borrow_mut().insert(item.clone(), setup(item));
+        });
+    }
+
+    {
+        let cells = cells.clone();
+        let thumbs = thumbs.clone();
+        factory.connect_bind(move |_, item| {
+            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+            let object = item.item().and_downcast::<glib::BoxedAnyObject>().unwrap();
+            let entry = object.borrow::<Entry>();
+            let Some(cell) = cells.borrow().get(item).cloned() else { return };
+            cell.picture.set_tooltip_text(Some(entry.name()));
+            match &*entry {
+                Entry::Folder { name, .. } => {
+                    thumbs.release(&cell);
+                    cell.show_folder(&folder_icon, name);
+                }
+                Entry::Photo(photo) => {
+                    if let Some(label) = &cell.label {
+                        label.set_visible(false);
+                    }
+                    let Some(path) = photo.file.path() else { return };
+                    let pixels = size as u32 * cell.picture.scale_factor().max(1) as u32;
+                    thumbs.request(&cell, path, pixels, item.position(), true);
+                }
+            }
+        });
+    }
+
+    {
+        let cells = cells.clone();
+        let thumbs = thumbs.clone();
+        factory.connect_unbind(move |_, item| {
+            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+            if let Some(cell) = cells.borrow().get(item) {
+                thumbs.release(cell);
+            }
+        });
+    }
+
+    factory.connect_teardown(move |_, item| {
+        let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+        cells.borrow_mut().remove(item);
+    });
+
+    factory
 }
 
 struct Waiting {
@@ -132,7 +216,8 @@ impl Thumbnails {
         self.pool.set_focus(position);
     }
 
-    /// Drop everything known about `path` (after it changed on disk).
+    /// Drop everything known about `path` (after it changed on disk or went
+    /// away, so a new file under the same name never shows the old pixels).
     pub fn forget(&self, path: &Path) {
         let mut cache = self.cache.borrow_mut();
         let mut bytes = self.cache_bytes.borrow_mut();
@@ -155,6 +240,17 @@ impl Thumbnails {
             .find_map(|b| cache.get(&(path.to_path_buf(), *b)).cloned())
     }
 
+    /// A cached texture at least as big as `bucket`, smallest first, so a
+    /// sharper copy in memory never has to be decoded again at a smaller
+    /// size (the GPU scales it down).
+    fn cached_at_least(&self, path: &Path, bucket: u32) -> Option<gdk::Texture> {
+        let mut cache = self.cache.borrow_mut();
+        BUCKETS
+            .iter()
+            .filter(|b| **b >= bucket)
+            .find_map(|b| cache.get(&(path.to_path_buf(), *b)).cloned())
+    }
+
     /// Show `path` in `cell` at roughly `size` pixels, now if cached or
     /// once decoded otherwise. `position` is the photo's index in the grid.
     /// With `placeholder`, the cell shows the skeleton (or the embedded
@@ -164,8 +260,8 @@ impl Thumbnails {
         let key = (path.clone(), bucket(size));
         *cell.key.borrow_mut() = Some(key.clone());
 
-        if let Some(texture) = self.cache.borrow_mut().get(&key) {
-            cell.show(texture, true);
+        if let Some(texture) = self.cached_at_least(&path, key.1) {
+            cell.show(&texture, true);
             return;
         }
         if placeholder {
@@ -175,7 +271,7 @@ impl Thumbnails {
             }
         }
 
-        let cancel = self.enqueue(&key, cell, || Job {
+        self.enqueue(&key, cell, || Job {
             path: path.clone(),
             kind: Kind::Full,
             target: key.1,
@@ -188,23 +284,30 @@ impl Thumbnails {
             && !self.no_preview.borrow().contains(&path)
             && !self.cache.borrow().contains(&preview_key);
         if wanted {
-            self.enqueue(&preview_key, cell, || Job { path, kind: Kind::Preview, target: PREVIEW, position, cancel });
+            // Its own flag: the preview and the full decode are waited on
+            // by different sets of cells and are canceled separately.
+            self.enqueue(&preview_key, cell, || Job {
+                path,
+                kind: Kind::Preview,
+                target: PREVIEW,
+                position,
+                cancel: Arc::new(AtomicBool::new(false)),
+            });
         }
     }
 
     /// Register `cell` as waiting on `key`, submitting the job if nobody
-    /// else already asked for it. Returns the job's cancel flag.
-    fn enqueue(&self, key: &Key, cell: &Rc<CellState>, job: impl FnOnce() -> Job) -> Arc<AtomicBool> {
+    /// else already asked for it.
+    fn enqueue(&self, key: &Key, cell: &Rc<CellState>, job: impl FnOnce() -> Job) {
         let mut waiting = self.waiting.borrow_mut();
         if let Some(entry) = waiting.get_mut(key) {
             entry.cells.push(Rc::downgrade(cell));
-            return entry.cancel.clone();
+            return;
         }
         let job = job();
         let cancel = job.cancel.clone();
         self.pool.submit(job);
-        waiting.insert(key.clone(), Waiting { cancel: cancel.clone(), cells: vec![Rc::downgrade(cell)] });
-        cancel
+        waiting.insert(key.clone(), Waiting { cancel, cells: vec![Rc::downgrade(cell)] });
     }
 
     /// The cell is being recycled; drop its requests and cancel the decodes
@@ -247,9 +350,7 @@ impl Thumbnails {
                 self.no_preview.borrow_mut().insert(key.0);
             }
             (Kind::Full, Err(err)) => {
-                if err != "canceled" {
-                    eprintln!("lantern: {}: {err}", key.0.display());
-                }
+                eprintln!("lantern: {}: {err}", key.0.display());
                 for cell in cells {
                     cell.show_broken();
                 }
