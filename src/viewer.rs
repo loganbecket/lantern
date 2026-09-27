@@ -12,6 +12,11 @@ use crate::thumbs::{CellState, Thumbnails};
 /// Decode size when the viewer hasn't been laid out yet.
 const FALLBACK_SIZE: u32 = 2048;
 
+/// Thumbnail size in the filmstrip along the bottom.
+const STRIP_SIZE: i32 = 88;
+/// Padding around each filmstrip cell, matching `.filmstrip > row` in style.css.
+const STRIP_PADDING: i32 = 4;
+
 pub struct Viewer {
     page: adw::NavigationPage,
     header: adw::HeaderBar,
@@ -23,6 +28,13 @@ pub struct Viewer {
     store: gio::ListStore,
     thumbs: Rc<Thumbnails>,
     index: Cell<u32>,
+    /// The filmstrip: every entry of the folder as a small tile, the
+    /// current one selected and kept centered.
+    strip: gtk::ScrolledWindow,
+    strip_selection: gtk::SingleSelection,
+    /// Set while the viewer moves the strip's selection itself, so that
+    /// doesn't bounce back as a user click.
+    syncing: Cell<bool>,
 }
 
 impl Viewer {
@@ -41,9 +53,23 @@ impl Viewer {
         let header = adw::HeaderBar::new();
         header.set_title_widget(Some(&title));
 
+        let strip_selection = gtk::SingleSelection::builder().model(&store).autoselect(false).build();
+        let strip_view = gtk::ListView::builder()
+            .model(&strip_selection)
+            .orientation(gtk::Orientation::Horizontal)
+            .css_classes(["filmstrip"])
+            .build();
+        let strip = gtk::ScrolledWindow::builder()
+            .child(&strip_view)
+            .vscrollbar_policy(gtk::PolicyType::Never)
+            .hscrollbar_policy(gtk::PolicyType::External)
+            .height_request(STRIP_SIZE + 2 * STRIP_PADDING)
+            .build();
+
         let view = adw::ToolbarView::new();
         view.add_top_bar(&header);
         view.set_content(Some(&picture));
+        view.add_bottom_bar(&strip);
 
         let page = adw::NavigationPage::builder().child(&view).tag("viewer").title("Photo").build();
 
@@ -59,6 +85,23 @@ impl Viewer {
             store,
             thumbs,
             index: Cell::new(0),
+            strip,
+            strip_selection,
+            syncing: Cell::new(false),
+        });
+        strip_view.set_factory(Some(&viewer.strip_factory()));
+
+        // A click (or arrow key) in the strip shows that photo.
+        let weak = Rc::downgrade(&viewer);
+        viewer.strip_selection.connect_selected_notify(move |selection| {
+            let Some(viewer) = weak.upgrade() else { return };
+            if viewer.syncing.get() {
+                return;
+            }
+            let selected = selection.selected();
+            if selected != gtk::INVALID_LIST_POSITION && selected != viewer.index.get() && viewer.photo(selected).is_some() {
+                viewer.show(selected);
+            }
         });
 
         let keys = gtk::EventControllerKey::new();
@@ -153,6 +196,93 @@ impl Viewer {
         None
     }
 
+    /// Select `index` in the filmstrip and center it.
+    fn sync_strip(&self, index: u32) {
+        self.syncing.set(true);
+        self.strip_selection.set_selected(index);
+        self.syncing.set(false);
+
+        let pitch = (STRIP_SIZE + 2 * STRIP_PADDING) as f64;
+        let adjustment = self.strip.hadjustment();
+        let page = adjustment.page_size();
+        if page > 0.0 {
+            let target = index as f64 * pitch + pitch / 2.0 - page / 2.0;
+            adjustment.set_value(target.clamp(0.0, (adjustment.upper() - page).max(0.0)));
+        }
+    }
+
+    /// Small tiles for the filmstrip, fed by the same loader and cache as
+    /// the grid, so they are usually already decoded.
+    fn strip_factory(self: &Rc<Self>) -> gtk::SignalListItemFactory {
+        let factory = gtk::SignalListItemFactory::new();
+        let cells: Rc<std::cell::RefCell<std::collections::HashMap<gtk::ListItem, Rc<CellState>>>> = Rc::default();
+
+        {
+            let cells = cells.clone();
+            factory.connect_setup(move |_, item| {
+                let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+                let picture = gtk::Picture::builder()
+                    .content_fit(gtk::ContentFit::Cover)
+                    .can_shrink(true)
+                    .width_request(STRIP_SIZE)
+                    .height_request(STRIP_SIZE)
+                    .css_classes(["skeleton"])
+                    .build();
+                item.set_child(Some(&picture));
+                cells.borrow_mut().insert(item.clone(), CellState::new(picture, gtk::Label::new(None)));
+            });
+        }
+
+        {
+            let cells = cells.clone();
+            let thumbs = self.thumbs.clone();
+            let icon = gtk::IconTheme::for_display(&WidgetExt::display(&self.page)).lookup_icon(
+                "folder",
+                &[],
+                STRIP_SIZE / 2,
+                self.page.scale_factor(),
+                gtk::TextDirection::None,
+                gtk::IconLookupFlags::empty(),
+            );
+            factory.connect_bind(move |_, item| {
+                let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+                let object = item.item().and_downcast::<glib::BoxedAnyObject>().unwrap();
+                let entry = object.borrow::<Entry>();
+                let Some(cell) = cells.borrow().get(item).cloned() else { return };
+                cell.picture.set_tooltip_text(Some(entry.name()));
+                match &*entry {
+                    Entry::Folder { name, .. } => {
+                        thumbs.release(&cell);
+                        cell.show_folder(&icon, name);
+                    }
+                    Entry::Photo(photo) => {
+                        let Some(path) = photo.file.path() else { return };
+                        let pixels = STRIP_SIZE as u32 * cell.picture.scale_factor().max(1) as u32;
+                        thumbs.request(&cell, path, pixels, item.position(), true);
+                    }
+                }
+            });
+        }
+
+        {
+            let cells = cells.clone();
+            let thumbs = self.thumbs.clone();
+            factory.connect_unbind(move |_, item| {
+                let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+                if let Some(cell) = cells.borrow().get(item) {
+                    thumbs.release(cell);
+                }
+            });
+        }
+
+        factory.connect_teardown(move |_, item| {
+            let item = item.downcast_ref::<gtk::ListItem>().unwrap();
+            cells.borrow_mut().remove(item);
+        });
+
+        factory
+    }
+
     fn photo(&self, index: u32) -> Option<PhotoInfo> {
         let object = self.store.item(index).and_downcast::<glib::BoxedAnyObject>()?;
         let photo = object.borrow::<Entry>().photo().cloned();
@@ -173,7 +303,10 @@ impl Viewer {
 
         self.title.set_title(&photo.name);
         self.title.set_subtitle(&format!("{} of {}", index + 1, self.store.n_items()));
-        self.cell.picture.grab_focus();
+        if !self.strip.has_focus() && self.strip.focus_child().is_none() {
+            self.cell.picture.grab_focus();
+        }
+        self.sync_strip(index);
 
         let size = self.target_size();
 

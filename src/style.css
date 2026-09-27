@@ -24,3 +24,13 @@ gridview > child:selected {
   margin: 0 8px 12px 8px;
   font-weight: 600;
 }
+
+/* The viewer's filmstrip along the bottom. */
+listview.filmstrip > row {
+  padding: 4px;
+}
+
+listview.filmstrip > row:selected {
+  background-color: alpha(@accent_bg_color, 0.35);
+  border-radius: 6px;
+}
