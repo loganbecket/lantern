@@ -1,6 +1,6 @@
 [package]
 name = "lantern"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 description = "A fast Linux photo browser with big, adjustable thumbnails"
 license = "MIT"
