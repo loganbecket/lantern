@@ -330,7 +330,18 @@ fn add_file_actions(
     }
     {
         let refresh = refresh.clone();
-        nav.connect_visible_page_notify(move |_| refresh());
+        let grid = grid.clone();
+        let viewer = viewer.clone();
+        nav.connect_visible_page_notify(move |_| {
+            refresh();
+            if viewer.take_dirty() {
+                grid.refresh_cells();
+            }
+        });
+    }
+    {
+        let toasts = toasts.clone();
+        viewer.connect_message(move |message| toasts.add_toast(adw::Toast::new(&message)));
     }
 
     // After files change under us: fix up the viewer, then report.

@@ -309,6 +309,11 @@ impl PhotoGrid {
         }
     }
 
+    /// Rebuild the visible tiles, e.g. after a photo changed on disk.
+    pub fn refresh_cells(&self) {
+        self.view.set_factory(Some(&self.make_factory()));
+    }
+
     pub fn set_cell_size(&self, size: i32) {
         if self.cell_size.replace(size) != size {
             self.update_columns();

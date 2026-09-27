@@ -132,6 +132,18 @@ impl Thumbnails {
         self.pool.set_focus(position);
     }
 
+    /// Drop everything known about `path` (after it changed on disk).
+    pub fn forget(&self, path: &Path) {
+        let mut cache = self.cache.borrow_mut();
+        let mut bytes = self.cache_bytes.borrow_mut();
+        for bucket in BUCKETS.iter().chain([PREVIEW].iter()) {
+            if let Some(texture) = cache.pop(&(path.to_path_buf(), *bucket)) {
+                *bytes -= texture_bytes(&texture);
+            }
+        }
+        self.no_preview.borrow_mut().remove(path);
+    }
+
     /// The largest decoded version of `path` already in memory, at any size,
     /// down to the embedded preview.
     pub fn any_cached(&self, path: &Path) -> Option<gdk::Texture> {

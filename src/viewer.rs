@@ -34,6 +34,12 @@ pub struct Viewer {
     strip_selection: gtk::SingleSelection,
     previous: gtk::Button,
     next: gtk::Button,
+    rotate_left: gtk::Button,
+    rotate_right: gtk::Button,
+    /// Where to report what happened (the window shows it as a toast).
+    on_message: std::cell::RefCell<Option<Box<dyn Fn(String)>>>,
+    /// Set when a photo was changed on disk, so the grid redraws its tiles.
+    dirty: Cell<bool>,
     /// Set while the viewer moves the strip's selection itself, so that
     /// doesn't bounce back as a user click.
     syncing: Cell<bool>,
@@ -54,6 +60,16 @@ impl Viewer {
         let title = adw::WindowTitle::new("", "");
         let header = adw::HeaderBar::new();
         header.set_title_widget(Some(&title));
+        let rotate_button = |icon: &str, tooltip: &str| {
+            gtk::Button::builder().icon_name(icon).tooltip_text(tooltip).can_focus(false).build()
+        };
+        let rotate_left = rotate_button("object-rotate-left-symbolic", "Rotate Left");
+        let rotate_right = rotate_button("object-rotate-right-symbolic", "Rotate Right");
+        let rotates = gtk::Box::new(gtk::Orientation::Horizontal, 0);
+        rotates.add_css_class("linked");
+        rotates.append(&rotate_left);
+        rotates.append(&rotate_right);
+        header.pack_start(&rotates);
 
         let strip_selection = gtk::SingleSelection::builder().model(&store).autoselect(false).build();
         let strip_view = gtk::ListView::builder()
@@ -109,8 +125,21 @@ impl Viewer {
             strip_selection,
             previous,
             next,
+            rotate_left,
+            rotate_right,
+            on_message: std::cell::RefCell::new(None),
+            dirty: Cell::new(false),
             syncing: Cell::new(false),
         });
+
+        for (button, clockwise) in [(&viewer.rotate_left, false), (&viewer.rotate_right, true)] {
+            let weak = Rc::downgrade(&viewer);
+            button.connect_clicked(move |_| {
+                if let Some(viewer) = weak.upgrade() {
+                    viewer.rotate(clockwise);
+                }
+            });
+        }
         strip_view.set_factory(Some(&viewer.strip_factory()));
 
         for (button, delta) in [(&viewer.previous, -1), (&viewer.next, 1)] {
@@ -176,6 +205,48 @@ impl Viewer {
 
     pub fn header(&self) -> &adw::HeaderBar {
         &self.header
+    }
+
+    pub fn connect_message(&self, f: impl Fn(String) + 'static) {
+        *self.on_message.borrow_mut() = Some(Box::new(f));
+    }
+
+    /// True once if a photo changed on disk since the last call.
+    pub fn take_dirty(&self) -> bool {
+        self.dirty.replace(false)
+    }
+
+    /// Rotate the photo on screen a quarter turn on disk, losslessly, then
+    /// show the result.
+    fn rotate(self: &Rc<Self>, clockwise: bool) {
+        let Some(path) = self.current().and_then(|p| p.file.path()) else { return };
+        self.rotate_left.set_sensitive(false);
+        self.rotate_right.set_sensitive(false);
+
+        let (tx, rx) = async_channel::bounded(1);
+        let job_path = path.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send_blocking(crate::rotate::rotate(&job_path, clockwise));
+        });
+
+        let viewer = self.clone();
+        glib::spawn_future_local(async move {
+            let result = rx.recv().await.unwrap_or_else(|_| Err("rotation failed".into()));
+            viewer.rotate_left.set_sensitive(true);
+            viewer.rotate_right.set_sensitive(true);
+            match result {
+                Ok(()) => {
+                    viewer.thumbs.forget(&path);
+                    viewer.dirty.set(true);
+                    viewer.update();
+                }
+                Err(err) => {
+                    if let Some(f) = &*viewer.on_message.borrow() {
+                        f(format!("Couldn't rotate: {err}"));
+                    }
+                }
+            }
+        });
     }
 
     /// The photo on screen.
