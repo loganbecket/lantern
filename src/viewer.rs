@@ -11,6 +11,12 @@ use crate::thumbs::{self, CellState, Thumbnails};
 
 /// Decode size when the viewer hasn't been laid out yet.
 const FALLBACK_SIZE: u32 = 2048;
+/// Decode size when zoomed in: the largest bucket, i.e. full resolution.
+const ZOOM_SIZE: u32 = 4096;
+/// How close to the window edge the pointer must be to pan a zoomed photo,
+/// and how fast it pans at the very edge.
+const PAN_EDGE: f64 = 56.0;
+const PAN_SPEED: f64 = 1400.0;
 
 /// Thumbnail size in the filmstrip along the bottom.
 const STRIP_SIZE: i32 = 88;
@@ -42,6 +48,14 @@ pub struct Viewer {
     rotate_right: gtk::Button,
     /// Where to report what happened (the window shows it as a toast).
     on_message: RefCell<Option<Box<dyn Fn(String)>>>,
+    /// Scrolls the photo when zoomed in past the window.
+    scroller: gtk::ScrolledWindow,
+    zoomed: Cell<bool>,
+    /// Pointer position over the scroller, for edge panning.
+    pointer: Cell<Option<(f64, f64)>>,
+    /// Bumped to stop a running pan animation.
+    pan_generation: Cell<u32>,
+    panning: Cell<bool>,
     /// Set while the viewer moves the strip's selection itself, so that
     /// doesn't bounce back as a user click.
     syncing: Cell<bool>,
@@ -100,7 +114,14 @@ impl Viewer {
         };
         let previous = arrow("go-previous-symbolic", gtk::Align::Start);
         let next = arrow("go-next-symbolic", gtk::Align::End);
-        let overlay = gtk::Overlay::builder().child(&picture).build();
+        let scroller = gtk::ScrolledWindow::builder()
+            .child(&picture)
+            .hscrollbar_policy(gtk::PolicyType::External)
+            .vscrollbar_policy(gtk::PolicyType::External)
+            .hexpand(true)
+            .vexpand(true)
+            .build();
+        let overlay = gtk::Overlay::builder().child(&scroller).build();
         overlay.add_overlay(&previous);
         overlay.add_overlay(&next);
 
@@ -128,8 +149,43 @@ impl Viewer {
             rotate_left,
             rotate_right,
             on_message: RefCell::new(None),
+            scroller,
+            zoomed: Cell::new(false),
+            pointer: Cell::new(None),
+            pan_generation: Cell::new(0),
+            panning: Cell::new(false),
             syncing: Cell::new(false),
         });
+        viewer.cell.picture.set_cursor_from_name(Some("zoom-in"));
+
+        // One click zooms in on that spot; another zooms back out.
+        let click = gtk::GestureClick::builder().button(gdk::BUTTON_PRIMARY).build();
+        let weak = Rc::downgrade(&viewer);
+        click.connect_released(move |_, presses, x, y| {
+            let Some(viewer) = weak.upgrade() else { return };
+            if presses == 1 {
+                viewer.toggle_zoom(x, y);
+            }
+        });
+        viewer.cell.picture.add_controller(click);
+
+        // Zoomed in, the photo pans toward wherever the pointer nears an edge.
+        let motion = gtk::EventControllerMotion::new();
+        let weak = Rc::downgrade(&viewer);
+        motion.connect_motion(move |_, x, y| {
+            let Some(viewer) = weak.upgrade() else { return };
+            viewer.pointer.set(Some((x, y)));
+            if viewer.zoomed.get() {
+                viewer.start_panning();
+            }
+        });
+        let weak = Rc::downgrade(&viewer);
+        motion.connect_leave(move |_| {
+            if let Some(viewer) = weak.upgrade() {
+                viewer.pointer.set(None);
+            }
+        });
+        viewer.scroller.add_controller(motion);
 
         // Small tiles for the filmstrip, fed by the same loader and cache as
         // the grid, so they are usually already decoded.
@@ -307,7 +363,100 @@ impl Viewer {
     pub fn show(&self, index: u32) {
         self.index.set(index);
         *self.file.borrow_mut() = self.photo(index).map(|p| p.file);
+        self.set_zoom(false);
         self.update();
+    }
+
+    /// Zoom in on the point clicked (picture coordinates), or back out.
+    fn toggle_zoom(self: &Rc<Self>, x: f64, y: f64) {
+        if self.zoomed.get() {
+            self.set_zoom(false);
+            return;
+        }
+        let picture = &self.cell.picture;
+        let Some(paintable) = picture.paintable() else { return };
+        let (iw, ih) = (paintable.intrinsic_width() as f64, paintable.intrinsic_height() as f64);
+        let (vw, vh) = (picture.width() as f64, picture.height() as f64);
+        if iw <= 0.0 || ih <= 0.0 || vw <= 0.0 || vh <= 0.0 {
+            return;
+        }
+        // Where on the photo the click landed while it was fitted.
+        let scale = (vw / iw).min(vh / ih);
+        let image_x = (x - (vw - iw * scale) / 2.0) / scale;
+        let image_y = (y - (vh - ih * scale) / 2.0) / scale;
+
+        self.set_zoom(true);
+
+        // Once laid out at full size, scroll so that point stays under the
+        // pointer.
+        let viewer = self.clone();
+        glib::idle_add_local_once(move || {
+            if !viewer.zoomed.get() {
+                return;
+            }
+            let h = viewer.scroller.hadjustment();
+            let v = viewer.scroller.vadjustment();
+            h.set_value((image_x - x).clamp(0.0, (h.upper() - h.page_size()).max(0.0)));
+            v.set_value((image_y - y).clamp(0.0, (v.upper() - v.page_size()).max(0.0)));
+        });
+    }
+
+    fn set_zoom(&self, zoomed: bool) {
+        if self.zoomed.replace(zoomed) == zoomed {
+            return;
+        }
+        let picture = &self.cell.picture;
+        // Shrinkable means "fit the window"; not shrinkable means the
+        // picture takes its full size and the scroller does the rest.
+        picture.set_can_shrink(!zoomed);
+        picture.set_cursor_from_name(Some(if zoomed { "zoom-out" } else { "zoom-in" }));
+        self.pan_generation.set(self.pan_generation.get().wrapping_add(1));
+        self.panning.set(false);
+        if zoomed {
+            self.request_photo();
+        }
+    }
+
+    /// Keep panning while the pointer stays near an edge of a zoomed photo.
+    fn start_panning(self: &Rc<Self>) {
+        if self.panning.replace(true) {
+            return;
+        }
+        let generation = self.pan_generation.get();
+        let viewer = self.clone();
+        let last = Cell::new(None::<i64>);
+        self.scroller.add_tick_callback(move |_, clock| {
+            let stop = || {
+                viewer.panning.set(false);
+                glib::ControlFlow::Break
+            };
+            if viewer.pan_generation.get() != generation || !viewer.zoomed.get() {
+                return stop();
+            }
+            let Some((x, y)) = viewer.pointer.get() else { return stop() };
+            let now = clock.frame_time();
+            let dt = last.replace(Some(now)).map_or(1.0 / 60.0, |t| (now - t) as f64 / 1_000_000.0);
+            let (w, h) = (viewer.scroller.width() as f64, viewer.scroller.height() as f64);
+            // Speed rises from zero at PAN_EDGE from the edge to PAN_SPEED at it.
+            let push = |pos: f64, size: f64| -> f64 {
+                if pos < PAN_EDGE {
+                    -(PAN_EDGE - pos) / PAN_EDGE
+                } else if pos > size - PAN_EDGE {
+                    (pos - (size - PAN_EDGE)) / PAN_EDGE
+                } else {
+                    0.0
+                }
+            };
+            let (dx, dy) = (push(x, w), push(y, h));
+            if dx == 0.0 && dy == 0.0 {
+                return stop();
+            }
+            for (adjustment, d) in [(viewer.scroller.hadjustment(), dx), (viewer.scroller.vadjustment(), dy)] {
+                let max = (adjustment.upper() - adjustment.page_size()).max(0.0);
+                adjustment.set_value((adjustment.value() + d * PAN_SPEED * dt).clamp(0.0, max));
+            }
+            glib::ControlFlow::Continue
+        });
     }
 
     fn step(&self, delta: i32) {
@@ -361,10 +510,24 @@ impl Viewer {
         if longest > 0 { longest as u32 * scale } else { FALLBACK_SIZE }
     }
 
+    /// Ask for the photo on screen at the size it needs now, putting
+    /// whatever is already decoded up right away so stepping through photos
+    /// feels instant while the sharper copy loads.
+    fn request_photo(&self) {
+        let index = self.index.get();
+        let Some(path) = self.photo(index).and_then(|p| p.file.path()) else { return };
+        let size = if self.zoomed.get() { ZOOM_SIZE } else { self.target_size() };
+        self.thumbs.release(&self.cell);
+        let placeholder = self.thumbs.any_cached(&path).is_none();
+        if let Some(texture) = self.thumbs.any_cached(&path) {
+            self.cell.picture.set_paintable(Some(&texture));
+        }
+        self.thumbs.request(&self.cell, path, size, index, placeholder);
+    }
+
     fn update(&self) {
         let index = self.index.get();
         let Some(photo) = self.photo(index) else { return };
-        let Some(path) = photo.file.path() else { return };
 
         self.title.set_title(&photo.name);
         self.title.set_subtitle(&format!("{} of {}", index + 1, self.store.n_items()));
@@ -376,18 +539,9 @@ impl Viewer {
         self.next.set_sensitive(self.nearest_photo(index + 1, 1).is_some());
         // The photo on screen goes first in the decode queue.
         self.thumbs.set_focus(index);
+        self.request_photo();
 
         let size = self.target_size();
-
-        // Put whatever thumbnail is already decoded on screen right away, so
-        // stepping through photos feels instant while the full size loads.
-        self.thumbs.release(&self.cell);
-        let placeholder = self.thumbs.any_cached(&path).is_none();
-        if let Some(texture) = self.thumbs.any_cached(&path) {
-            self.cell.picture.set_paintable(Some(&texture));
-        }
-        self.thumbs.request(&self.cell, path, size, index, placeholder);
-
         for (cell, neighbor) in self.neighbors.iter().zip([index.wrapping_sub(1), index + 1]) {
             self.thumbs.release(cell);
             if let Some(path) = self.photo(neighbor).and_then(|p| p.file.path()) {
