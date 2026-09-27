@@ -252,8 +252,9 @@ impl Viewer {
             viewer.rotate_right.set_sensitive(true);
             match result {
                 Ok(()) => {
-                    viewer.thumbs.forget(&path);
-                    // Rebinds this one item in the filmstrip and the grid.
+                    // Turn what is already decoded rather than reading the
+                    // file again; then rebind this item everywhere it shows.
+                    viewer.thumbs.rotate_cached(&path, clockwise);
                     viewer.store.items_changed(viewer.index.get(), 1, 1);
                     viewer.update();
                 }

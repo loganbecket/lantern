@@ -108,6 +108,13 @@ window in an already running Lantern.
 - 2026-09-27, review: embedded previews were being decoded at 1/8 scale
   (a 160 px thumbnail shown as 20 px) because the preview asked
   `decode_jpeg` for a 1 px target; now decoded at full size, with a test.
+- 2026-09-27, rotation. The EXIF-tag case now reads a 64 KB prefix and
+  writes two bytes in place instead of reading and rewriting the whole
+  file, and cached thumbnails are turned in memory instead of re-read:
+  0 ms per turn on a 9 MB 12 MP JPEG on local disk
+  (`cargo test rotate_timing -- --ignored`). Over the Wi-Fi share the old
+  path cost one full read, one full write and two more full reads for
+  the redecodes, roughly 1.5 s; the new one is one small read.
 - 2026-09-26, date taken. Reading the first 64 KB of a file finds the EXIF
   date for 39 of 40 real iPhone HEICs; 1000 local files take ~40 ms. On the
   share every file open costs ~100 ms and opens serialize, so the same pass
